@@ -1,7 +1,124 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from uuid import uuid4
+from typing import Optional, List, Dict
+import datetime
+import os
+import openai
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
+api_key = os.environ.get('OPENAI_API_KEY')
+
+# Initialize the OpenAI client
+client = openai.OpenAI(api_key=api_key)
 
 app = FastAPI()
 
-@app.get("/ping")
-def ping():
-    return {"message": "pong"}
+# In-memory store for now (replace with DB later)
+DOCUMENTS = {}
+
+# Pydantic models
+class DocumentInput(BaseModel):
+    title: Optional[str] = None
+    raw_text: str
+
+class DocumentResponse(BaseModel):
+    document_id: str
+    status: str  # 'processing', 'ready', or 'error'
+
+class Section(BaseModel):
+    title: str
+    first_sentence: str
+    sub_sections: Optional[List[Dict]] = []
+
+class SectionDetectionResponse(BaseModel):
+    sections: List[Section]
+    learning_objectives: Dict[str, str]
+
+
+# Routes
+@app.post("/documents/", response_model=DocumentResponse)
+async def upload_document(doc: DocumentInput):
+    # Simulate storing and start processing
+    doc_id = str(uuid4())
+    DOCUMENTS[doc_id] = {
+        "title": doc.title,
+        "raw_text": doc.raw_text,
+        "upload_time": datetime.datetime.now().isoformat(),
+        "status": "processing",
+        "sections": None,
+        "learning_objectives": None,
+    }
+    # TODO: Call GPT to detect sections and store them
+    
+    return {"document_id": doc_id, "status": "processing"}
+
+@app.post("/documents/{doc_id}/sections/detect", response_model=SectionDetectionResponse)
+async def detect_sections(doc_id: str):
+    if doc_id not in DOCUMENTS:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    raw_text = DOCUMENTS[doc_id]["raw_text"]
+
+    # GPT prompt
+    prompt = f"""
+You are an AI Tutor tasked with identifying and labeling the sections of a given article. Please analyze the content and provide a hierarchical list of the sections and sub-sections that contain valuable, informative content. Exclude sections such as the abstract, references, and appendix.
+
+For each section and sub-section, include the first sentence or header of the section.
+
+Also, generate a list of 3–5 key learning objectives a user should achieve after reading.
+
+Return only valid JSON in this format:
+{{
+  "sections": [
+    {{
+      "title": "<Title>",
+      "first_sentence": "<First Sentence>",
+      "sub_sections": []
+    }},
+    ...
+  ],
+  "learning_objectives": {{
+    "1": "<Objective 1>",
+    "2": "<Objective 2>",
+    ...
+  }}
+}}
+
+ Each section in the "sections" list should have:
+        - "title": A short, clear label summarizing the section's content.
+        - "first_sentence": The first sentence or header of that section.
+        - "sub_sections": A list of sub-sections, each containing the same keys as above.
+
+Here is the article:
+\"\"\"
+{raw_text}
+\"\"\"
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-nano",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        gpt_output = response.choices[0].message.content
+
+        # Try to safely parse JSON
+        import json
+        data = json.loads(gpt_output)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing GPT response: {e}")
+
+    # Store in-memory
+    DOCUMENTS[doc_id]["sections"] = data["sections"]
+    DOCUMENTS[doc_id]["learning_objectives"] = data["learning_objectives"]
+    DOCUMENTS[doc_id]["status"] = "ready"
+
+    return data
