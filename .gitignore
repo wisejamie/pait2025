@@ -192,3 +192,25 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Node.js (Frontend)
+node_modules/
+.next/
+.env.local
+.env.development
+.env.production
+*.log
+
+# Python Virtual Environments (if not already covered above)
+backend/venv/
+backend/.env
+
+# Local dev files
+__pycache__/
+*.sqlite3
+*.db
+
+# Build output
+dist/
+build/
+*.egg-info/
