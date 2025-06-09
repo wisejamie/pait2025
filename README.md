@@ -17,16 +17,20 @@ This app turns difficult documents into adaptive, interactive quizzes designed t
 - **LLM:** GPT-4 via OpenAI API
 - **Storage:** To be determined (likely SQLite or Supabase for MVP)
 
-## 🗂 Project Structure (needs review; is probably not accurate)
+## 📁 Project Structure
 
-ai-tutor-quiz/
-│
-├── backend/
-├── frontend/
-├── scripts/
-├── tests/
-├── README.md # You're here
-└── .gitignore
+```
+.
+├── LICENSE                 # Project license
+├── README.md               # Project overview and setup instructions
+├── backend/                # Backend code (FastAPI)
+│   ├── app/                # Main FastAPI application logic
+│   └── tests/              # Unit and integration tests for backend
+├── frontend/               # Frontend code (Next.js)
+│   ├── components/         # React UI components
+│   └── pages/              # Next.js page routes
+├── docs/                   # Internal documentation (timeline, planning notes) 
+```
 
 ## ✅ Getting Started
 
