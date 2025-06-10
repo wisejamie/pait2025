@@ -6,7 +6,10 @@ import datetime
 import os
 import openai
 from dotenv import load_dotenv
+import json
 from app.utils.text_extraction import extract_section_text, SectionExtractionError
+from app.utils.question_generation import build_question_prompt
+
 
 # Load environment variables from .env
 load_dotenv()
@@ -43,6 +46,22 @@ Section.update_forward_refs()
 class SectionDetectionResponse(BaseModel):
     sections: List[Section]
     learning_objectives: Dict[str, str]
+
+
+class Question(BaseModel):
+    question_text: str
+    options: List[str]
+    correct_index: int
+    explanation: str
+    difficulty: Optional[str] = "medium"  # optional with default
+    skill: Optional[str] = None
+    tags: Optional[List[str]] = []
+
+class QuestionGenerationRequest(BaseModel):
+    section_text: str
+    section_title: str
+    num_questions: int = 2  # optional, default to 2
+    learning_objectives: List[str] = []
 
 
 # Routes
@@ -117,13 +136,14 @@ Here is the article:
         gpt_output = response.choices[0].message.content
 
         # Try to safely parse JSON
-        import json
         data = json.loads(gpt_output)
         sections = data["sections"]
 
         # Add section text to each section
         try:
             sections_with_text = extract_section_text(raw_text, sections)
+            for section in sections_with_text:
+                section["questions"] = []
         except SectionExtractionError as e:
             raise HTTPException(status_code=422, detail=str(e))
 
@@ -139,3 +159,39 @@ Here is the article:
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing GPT response: {e}")
+
+
+@app.post("/sections/{section_id}/questions/generate", response_model=List[Question])
+async def generate_questions(section_id: str, req: QuestionGenerationRequest):
+    from app.utils.text_extraction import SectionExtractionError  # optional if reused
+
+    try:
+        prompt = build_question_prompt(
+            section_text=req.section_text,
+            section_title=req.section_title,
+            num_questions=req.num_questions,
+            learning_objectives=req.learning_objectives
+        )
+
+        response = client.chat.completions.create(
+            model="gpt-4.1-nano",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+
+        gpt_output = response.choices[0].message.content
+        parsed = json.loads(gpt_output)
+
+        if isinstance(parsed, dict) and "questions" in parsed:
+            questions = parsed["questions"]
+        else:
+            questions = parsed
+
+        # Optional: validate all entries conform to schema (let FastAPI do it)
+        return questions
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Question generation failed: {str(e)}")

@@ -41,7 +41,7 @@ def extract_section_text(article_text, sections):
             if start_idx is None:
                 raise SectionExtractionError(section.get("title", "Unknown"))
 
-             # Find end index using the next section's start sentence
+            # Find end index using the next section's start sentence
             next_idx = None
             if idx + 1 < len(section_list):
                 next_first = section_list[idx + 1]["first_sentence"]
