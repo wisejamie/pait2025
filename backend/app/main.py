@@ -6,6 +6,7 @@ import datetime
 import os
 import openai
 from dotenv import load_dotenv
+from app.utils.text_extraction import extract_section_text, SectionExtractionError
 
 # Load environment variables from .env
 load_dotenv()
@@ -31,7 +32,13 @@ class DocumentResponse(BaseModel):
 class Section(BaseModel):
     title: str
     first_sentence: str
+    text: Optional[str] = None
     sub_sections: Optional[List[Dict]] = []
+
+    class Config:
+        orm_mode = True
+
+Section.update_forward_refs()
 
 class SectionDetectionResponse(BaseModel):
     sections: List[Section]
@@ -112,13 +119,23 @@ Here is the article:
         # Try to safely parse JSON
         import json
         data = json.loads(gpt_output)
+        sections = data["sections"]
+
+        # Add section text to each section
+        try:
+            sections_with_text = extract_section_text(raw_text, sections)
+        except SectionExtractionError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+        # Save enriched sections
+        DOCUMENTS[doc_id]["sections"] = sections_with_text
+        DOCUMENTS[doc_id]["learning_objectives"] = data["learning_objectives"]
+        DOCUMENTS[doc_id]["status"] = "ready"
+
+        return {
+            "sections": sections_with_text,
+            "learning_objectives": data["learning_objectives"]
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing GPT response: {e}")
-
-    # Store in-memory
-    DOCUMENTS[doc_id]["sections"] = data["sections"]
-    DOCUMENTS[doc_id]["learning_objectives"] = data["learning_objectives"]
-    DOCUMENTS[doc_id]["status"] = "ready"
-
-    return data
