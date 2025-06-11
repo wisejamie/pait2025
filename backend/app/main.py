@@ -22,6 +22,7 @@ app = FastAPI()
 
 # In-memory store for now (replace with DB later)
 DOCUMENTS = {}
+QUESTIONS = {}
 
 # Pydantic models
 class DocumentInput(BaseModel):
@@ -197,6 +198,8 @@ async def generate_questions(section_id: str, req: QuestionGenerationRequest):
             questions = parsed["questions"]
         else:
             questions = parsed
+        
+        QUESTIONS[section_id] = questions
 
         # Optional: validate all entries conform to schema (let FastAPI do it)
         return questions
@@ -220,3 +223,23 @@ async def get_document(doc_id: str):
         "learning_objectives": doc.get("learning_objectives"),
     }
 
+@app.get("/documents/{doc_id}/questions", response_model=List[Question])
+async def get_document_questions(doc_id: str):
+    if doc_id not in DOCUMENTS:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc = DOCUMENTS[doc_id]
+    sections = doc.get("sections", [])
+    all_questions = []
+
+    def collect_questions(section_list):
+        for section in section_list:
+            section_id = section["title"]  # Using title as stand-in ID
+            if section_id in QUESTIONS:
+                all_questions.extend(QUESTIONS[section_id])
+            if "sub_sections" in section:
+                collect_questions(section["sub_sections"])
+
+    collect_questions(sections)
+
+    return all_questions
