@@ -63,6 +63,14 @@ class QuestionGenerationRequest(BaseModel):
     num_questions: int = 2  # optional, default to 2
     learning_objectives: List[str] = []
 
+class DocumentFullView(BaseModel):
+    document_id: str
+    title: Optional[str]
+    raw_text: str
+    status: str
+    sections: Optional[List[Section]]
+    learning_objectives: Optional[Dict[str, str]]
+
 
 # Routes
 @app.post("/documents/", response_model=DocumentResponse)
@@ -90,39 +98,39 @@ async def detect_sections(doc_id: str):
 
     # GPT prompt
     prompt = f"""
-You are an AI Tutor tasked with identifying and labeling the sections of a given article. Please analyze the content and provide a hierarchical list of the sections and sub-sections that contain valuable, informative content. Exclude sections such as the abstract, references, and appendix.
+    You are an AI Tutor tasked with identifying and labeling the sections of a given article. Please analyze the content and provide a hierarchical list of the sections and sub-sections that contain valuable, informative content. Exclude sections such as the abstract, references, and appendix.
 
-For each section and sub-section, include the first sentence or header of the section.
+    For each section and sub-section, include the first sentence or header of the section.
 
-Also, generate a list of 3–5 key learning objectives a user should achieve after reading.
+    Also, generate a list of 3–5 key learning objectives a user should achieve after reading.
 
-Return only valid JSON in this format:
-{{
-  "sections": [
+    Return only valid JSON in this format:
     {{
-      "title": "<Title>",
-      "first_sentence": "<First Sentence>",
-      "sub_sections": []
-    }},
-    ...
-  ],
-  "learning_objectives": {{
-    "1": "<Objective 1>",
-    "2": "<Objective 2>",
-    ...
-  }}
-}}
+    "sections": [
+        {{
+        "title": "<Title>",
+        "first_sentence": "<First Sentence>",
+        "sub_sections": []
+        }},
+        ...
+    ],
+    "learning_objectives": {{
+        "1": "<Objective 1>",
+        "2": "<Objective 2>",
+        ...
+    }}
+    }}
 
- Each section in the "sections" list should have:
-        - "title": A short, clear label summarizing the section's content.
-        - "first_sentence": The first sentence or header of that section.
-        - "sub_sections": A list of sub-sections, each containing the same keys as above.
+    Each section in the "sections" list should have:
+            - "title": A short, clear label summarizing the section's content.
+            - "first_sentence": The first sentence or header of that section.
+            - "sub_sections": A list of sub-sections, each containing the same keys as above.
 
-Here is the article:
-\"\"\"
-{raw_text}
-\"\"\"
-"""
+    Here is the article:
+    \"\"\"
+    {raw_text}
+    \"\"\"
+    """
 
     try:
         response = client.chat.completions.create(
@@ -195,3 +203,20 @@ async def generate_questions(section_id: str, req: QuestionGenerationRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Question generation failed: {str(e)}")
+
+@app.get("/documents/{doc_id}", response_model=DocumentFullView)
+async def get_document(doc_id: str):
+    if doc_id not in DOCUMENTS:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc = DOCUMENTS[doc_id]
+
+    return {
+        "document_id": doc_id,
+        "title": doc.get("title"),
+        "raw_text": doc["raw_text"],
+        "status": doc.get("status", "processing"),
+        "sections": doc.get("sections"),
+        "learning_objectives": doc.get("learning_objectives"),
+    }
+
