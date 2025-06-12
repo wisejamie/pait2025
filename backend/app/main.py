@@ -243,3 +243,33 @@ async def get_document_questions(doc_id: str):
     collect_questions(sections)
 
     return all_questions
+
+import httpx
+
+@app.post("/documents/{doc_id}/questions/generate-all")
+async def generate_questions_for_all_sections(doc_id: str):
+    if doc_id not in DOCUMENTS:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc = DOCUMENTS[doc_id]
+    sections = doc.get("sections", [])
+    learning_objectives = doc.get("learning_objectives", {})
+
+    results = {}
+
+    async with httpx.AsyncClient(base_url="http://127.0.0.1:8000") as client:
+        for i, section in enumerate(sections):
+            section_id = f"{doc_id}_section_{i}"
+            req_body = {
+                "section_text": section["text"],
+                "section_title": section["title"],
+                "num_questions": 2,
+                "learning_objectives": list(learning_objectives.values())
+            }
+            response = await client.post(f"/sections/{section_id}/questions/generate", json=req_body)
+            if response.status_code != 200:
+                results[section_id] = {"error": response.text}
+            else:
+                results[section_id] = response.json()
+
+    return results
