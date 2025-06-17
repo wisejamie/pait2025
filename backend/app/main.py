@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from uuid import uuid4
 from typing import Optional, List, Dict
@@ -7,7 +7,7 @@ import os
 import openai
 from dotenv import load_dotenv
 import json
-from app.utils.text_extraction import extract_section_text, SectionExtractionError
+from app.utils.text_extraction import extract_section_text, SectionExtractionError, extract_text_from_pdf
 from app.utils.question_generation import build_question_prompt
 
 
@@ -40,7 +40,7 @@ class Section(BaseModel):
     sub_sections: Optional[List[Dict]] = []
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 Section.update_forward_refs()
 
@@ -86,9 +86,32 @@ async def upload_document(doc: DocumentInput):
         "sections": None,
         "learning_objectives": None,
     }
-    # TODO: Call GPT to detect sections and store them
     
     return {"document_id": doc_id, "status": "processing"}
+
+@app.post("/documents/upload-file", response_model=DocumentResponse)
+async def upload_document_file(file: UploadFile = File(...)):
+    # Check file type
+    if file.content_type == "application/pdf":
+        raw_text = extract_text_from_pdf(file.file)
+    elif file.content_type == "text/plain":
+        raw_bytes = await file.read()
+        raw_text = raw_bytes.decode("utf-8")
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
+    doc_id = str(uuid4())
+    DOCUMENTS[doc_id] = {
+        "title": file.filename,
+        "raw_text": raw_text,
+        "upload_time": datetime.datetime.now().isoformat(),
+        "status": "processing",
+        "sections": None,
+        "learning_objectives": None,
+    }
+
+    return {"document_id": doc_id, "status": "processing"}
+
 
 @app.post("/documents/{doc_id}/sections/detect", response_model=SectionDetectionResponse)
 async def detect_sections(doc_id: str):
@@ -101,7 +124,7 @@ async def detect_sections(doc_id: str):
     prompt = f"""
     You are an AI Tutor tasked with identifying and labeling the sections of a given article. Please analyze the content and provide a hierarchical list of the sections and sub-sections that contain valuable, informative content. Exclude sections such as the abstract, references, and appendix.
 
-    For each section and sub-section, include the first sentence or header of the section.
+    For each section and sub-section, include the first 15 words of the section.
 
     Also, generate a list of 3–5 key learning objectives a user should achieve after reading.
 
@@ -110,7 +133,7 @@ async def detect_sections(doc_id: str):
     "sections": [
         {{
         "title": "<Title>",
-        "first_sentence": "<First Sentence>",
+        "first_sentence": "<First 15 words of this section’s content>",
         "sub_sections": []
         }},
         ...
