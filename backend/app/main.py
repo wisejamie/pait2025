@@ -8,8 +8,7 @@ import openai
 from dotenv import load_dotenv
 import json
 from app.utils.text_extraction import build_section_extraction_prompt, extract_section_text, SectionExtractionError, extract_text_from_pdf
-from app.utils.question_generation import build_question_prompt
-from app.question_pipeline import generate_question_set
+from app.utils.question_pipeline import generate_question_set
 
 
 # Load environment variables from .env
@@ -154,40 +153,6 @@ async def detect_sections(doc_id: str):
 
     # GPT prompt
     prompt = build_section_extraction_prompt(raw_text)
-    # prompt = f"""
-    # You are an AI Tutor tasked with identifying and labeling the sections of a given article. Please analyze the content and provide a hierarchical list of the sections and sub-sections that contain valuable, informative content. Exclude sections such as the abstract, references, and appendix.
-
-    # For each section and sub-section, include the first 15 words of the section.
-
-    # Also, generate a list of 3–5 key learning objectives a user should achieve after reading.
-
-    # Return only valid JSON in this format:
-    # {{
-    # "sections": [
-    #     {{
-    #     "title": "<Title>",
-    #     "first_sentence": "<First 15 words of this section’s content>",
-    #     "sub_sections": []
-    #     }},
-    #     ...
-    # ],
-    # "learning_objectives": {{
-    #     "1": "<Objective 1>",
-    #     "2": "<Objective 2>",
-    #     ...
-    # }}
-    # }}
-
-    # Each section in the "sections" list should have:
-    #         - "title": A short, clear label summarizing the section's content.
-    #         - "first_sentence": The first sentence or header of that section.
-    #         - "sub_sections": A list of sub-sections, each containing the same keys as above.
-
-    # Here is the article:
-    # \"\"\"
-    # {raw_text}
-    # \"\"\"
-    # """
 
     try:
         response = client.chat.completions.create(
@@ -224,43 +189,6 @@ async def detect_sections(doc_id: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing GPT response: {e}")
-
-
-@app.post("/sections/{section_id}/questions/generate", response_model=List[Question])
-async def generate_questions(section_id: str, req: QuestionGenerationRequest):
-    try:
-        prompt = build_question_prompt(
-            section_text=req.section_text,
-            section_title=req.section_title,
-            num_questions=req.num_questions,
-            learning_objectives=req.learning_objectives
-        )
-
-        response = client.chat.completions.create(
-            model="gpt-4.1-nano",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            response_format={"type": "json_object"}
-        )
-
-        parsed = json.loads(response.choices[0].message.content)
-        print(parsed)
-
-        # Normalize into a list
-        if isinstance(parsed, dict) and "questions" in parsed:
-            questions = parsed["questions"]
-        elif isinstance(parsed, list):
-            questions = parsed
-        else:
-            # single question object → wrap in a list
-            questions = [parsed]
-
-        # Store and return
-        QUESTIONS[section_id] = questions
-        return questions
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Question generation failed: {e}")
 
 
 @app.get("/documents/{doc_id}", response_model=DocumentFullView)
@@ -300,7 +228,6 @@ async def get_document_questions(doc_id: str):
 
     return all_questions
 
-import httpx
 
 @app.post("/documents/{doc_id}/questions/generate-all")
 async def generate_questions_for_all_sections(doc_id: str):
@@ -348,49 +275,3 @@ async def generate_questions_for_all_sections(doc_id: str):
             results[section_id] = {"error": str(e)}
 
     return results
-
-
-# @app.post("/documents/{doc_id}/questions/generate-all")
-# async def generate_questions_for_all_sections(doc_id: str):
-#     if doc_id not in DOCUMENTS:
-#         raise HTTPException(status_code=404, detail="Document not found")
-
-#     doc = DOCUMENTS[doc_id]
-#     top_sections = doc.get("sections", [])
-#     learning_objectives = list(doc.get("learning_objectives", {}).values())
-
-#     # 1. Flatten the nested section tree into a single list
-#     def flatten_sections(secs: list[dict]) -> list[dict]:
-#         flat = []
-#         for sec in secs:
-#             flat.append(sec)
-#             # Recurse into sub_sections if present
-#             if sec.get("sub_sections"):
-#                 flat.extend(flatten_sections(sec["sub_sections"]))
-#         return flat
-
-#     all_sections = flatten_sections(top_sections)
-
-#     results: dict[str, any] = {}
-#     async with httpx.AsyncClient(base_url="http://127.0.0.1:8000") as client:
-#         for idx, section in enumerate(all_sections):
-#             # Create a unique section_id for storage
-#             section_id = f"{doc_id}_section_{idx}"
-#             req_body = {
-#                 "section_text": section.get("text", ""),
-#                 "section_title": section["title"],
-#                 "num_questions": 2,
-#                 "learning_objectives": learning_objectives
-#             }
-
-#             response = await client.post(
-#                 f"/sections/{section_id}/questions/generate",
-#                 json=req_body
-#             )
-
-#             if response.status_code != 200:
-#                 results[section_id] = {"error": response.text}
-#             else:
-#                 results[section_id] = response.json()
-
-#     return results
