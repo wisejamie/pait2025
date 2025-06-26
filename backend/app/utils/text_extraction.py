@@ -10,6 +10,69 @@ class SectionExtractionError(Exception):
         self.message = message or f"Failed to extract text for section: {section_title}"
         super().__init__(self.message)
 
+def build_section_extraction_prompt(raw_text: str) -> str:
+    return f"""
+You are an AI Tutor tasked with analyzing an academic article and identifying its informative sections and sub-sections. Your goal is to help students understand this document by organizing it and identifying key learning goals.
+
+Instructions:
+
+1. Identify a hierarchical list of sections and sub-sections that contain meaningful content.
+   - **Exclude** the abstract, references, acknowledgments, and appendix.
+   - Use only content-rich parts of the article.
+   
+2. For each section and sub-section, include:
+   - "title": A short, informative label summarizing its content.
+   - "first_sentence": The **first 15 words** of the section, exactly as they appear in the article.
+   - "sub_sections": A list of nested sub-sections (each with the same structure).
+   - "learning_objectives": A list of **2–5** specific objectives a user should achieve after reading this section.
+   
+   Section-level objectives should:
+   - Focus on **local comprehension** — that is, concepts, arguments, methods, or findings presented in the section.
+   - Be **factually correct** and **clearly grounded in the section text** (either explicitly stated or strongly supported).
+   - Be phrased as **measurable learning goals** — not vague outcomes like “Understand X” or “Know about Y”.
+
+   Here are some examples of strong learning objectives formats:
+   - “Define <concept> to mean <correct definition or explanation>”
+   - “Describe <process or finding> as <correct mechanism or outcome>”
+   - “Explain how <cause> leads to <effect>, as shown in the text”
+   - “Compare <A> and <B> with respect to <dimension>, noting that <key distinction>”
+
+3. Also include a separate list of **global learning objectives** for the document as a whole.
+   - These should reflect the **big-picture educational goals** across the entire article.
+   - Provide 3–5 objectives, each describing an important insight or skill the user should gain.
+
+Return **only valid JSON** in the following structure:
+
+{{
+  "sections": [
+    {{
+      "title": "<Section Title>",
+      "first_sentence": "<First 15 words>",
+      "learning_objectives": ["<Objective 1>", "<Objective 2>", "<Objective 3>"],
+      "sub_sections": [
+        {{
+          "title": "<Subsection Title>",
+          "first_sentence": "<First 15 words>",
+          "learning_objectives": ["<Objective 1>", "<Objective 2>"],
+          "sub_sections": []
+        }}
+      ]
+    }},
+    ...
+  ],
+  "learning_objectives": {{
+    "1": "<Global Objective 1>",
+    "2": "<Global Objective 2>",
+    ...
+  }}
+}}
+
+Here is the article:
+\"\"\"
+{raw_text}
+\"\"\"
+"""
+
 
 def find_fuzzy_sentence(article_words, first_sentence,
                         chunk_size=5,

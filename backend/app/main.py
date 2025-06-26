@@ -1,14 +1,15 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from uuid import uuid4
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple, Any
 import datetime
 import os
 import openai
 from dotenv import load_dotenv
 import json
-from app.utils.text_extraction import extract_section_text, SectionExtractionError, extract_text_from_pdf
+from app.utils.text_extraction import build_section_extraction_prompt, extract_section_text, SectionExtractionError, extract_text_from_pdf
 from app.utils.question_generation import build_question_prompt
+from app.question_pipeline import generate_question_set
 
 
 # Load environment variables from .env
@@ -50,13 +51,44 @@ class SectionDetectionResponse(BaseModel):
 
 
 class Question(BaseModel):
-    question_text: str
-    options: List[str]
-    correct_index: int
-    explanation: str
-    difficulty: Optional[str] = "medium"  # optional with default
-    skill: Optional[str] = None
-    tags: Optional[List[str]] = []
+    question_text: str = Field(..., description="The question prompt")
+    options: List[str] = Field(
+        ..., 
+        min_items=4, 
+        max_items=4, 
+        description="Exactly four answer choices"
+    )
+    correct_index: int = Field(
+        ..., 
+        ge=0, 
+        le=3, 
+        description="Index (0–3) of the correct option"
+    )
+    explanation: str = Field(..., description="One-sentence rationale for the correct answer")
+    difficulty_score: float = Field(
+        ..., 
+        ge=0.0, 
+        le=1.0, 
+        description="0.0 = very easy … 1.0 = very hard"
+    )
+    concept_tags: List[str] = Field(
+        ..., 
+        min_items=1, 
+        max_items=3, 
+        description="1–3 topic tags for the question"
+    )
+    salience: float = Field(
+        ..., 
+        ge=0.0, 
+        le=1.0, 
+        description="0.0 = peripheral … 1.0 = core concept"
+    )
+    directness: float = Field(
+        ..., 
+        ge=0.0, 
+        le=1.0, 
+        description="0.0 = requires inference … 1.0 = stated literally"
+    )
 
 class QuestionGenerationRequest(BaseModel):
     section_text: str
@@ -121,40 +153,41 @@ async def detect_sections(doc_id: str):
     raw_text = DOCUMENTS[doc_id]["raw_text"]
 
     # GPT prompt
-    prompt = f"""
-    You are an AI Tutor tasked with identifying and labeling the sections of a given article. Please analyze the content and provide a hierarchical list of the sections and sub-sections that contain valuable, informative content. Exclude sections such as the abstract, references, and appendix.
+    prompt = build_section_extraction_prompt(raw_text)
+    # prompt = f"""
+    # You are an AI Tutor tasked with identifying and labeling the sections of a given article. Please analyze the content and provide a hierarchical list of the sections and sub-sections that contain valuable, informative content. Exclude sections such as the abstract, references, and appendix.
 
-    For each section and sub-section, include the first 15 words of the section.
+    # For each section and sub-section, include the first 15 words of the section.
 
-    Also, generate a list of 3–5 key learning objectives a user should achieve after reading.
+    # Also, generate a list of 3–5 key learning objectives a user should achieve after reading.
 
-    Return only valid JSON in this format:
-    {{
-    "sections": [
-        {{
-        "title": "<Title>",
-        "first_sentence": "<First 15 words of this section’s content>",
-        "sub_sections": []
-        }},
-        ...
-    ],
-    "learning_objectives": {{
-        "1": "<Objective 1>",
-        "2": "<Objective 2>",
-        ...
-    }}
-    }}
+    # Return only valid JSON in this format:
+    # {{
+    # "sections": [
+    #     {{
+    #     "title": "<Title>",
+    #     "first_sentence": "<First 15 words of this section’s content>",
+    #     "sub_sections": []
+    #     }},
+    #     ...
+    # ],
+    # "learning_objectives": {{
+    #     "1": "<Objective 1>",
+    #     "2": "<Objective 2>",
+    #     ...
+    # }}
+    # }}
 
-    Each section in the "sections" list should have:
-            - "title": A short, clear label summarizing the section's content.
-            - "first_sentence": The first sentence or header of that section.
-            - "sub_sections": A list of sub-sections, each containing the same keys as above.
+    # Each section in the "sections" list should have:
+    #         - "title": A short, clear label summarizing the section's content.
+    #         - "first_sentence": The first sentence or header of that section.
+    #         - "sub_sections": A list of sub-sections, each containing the same keys as above.
 
-    Here is the article:
-    \"\"\"
-    {raw_text}
-    \"\"\"
-    """
+    # Here is the article:
+    # \"\"\"
+    # {raw_text}
+    # \"\"\"
+    # """
 
     try:
         response = client.chat.completions.create(
@@ -195,8 +228,6 @@ async def detect_sections(doc_id: str):
 
 @app.post("/sections/{section_id}/questions/generate", response_model=List[Question])
 async def generate_questions(section_id: str, req: QuestionGenerationRequest):
-    from app.utils.text_extraction import SectionExtractionError  # optional if reused
-
     try:
         prompt = build_question_prompt(
             section_text=req.section_text,
@@ -207,28 +238,30 @@ async def generate_questions(section_id: str, req: QuestionGenerationRequest):
 
         response = client.chat.completions.create(
             model="gpt-4.1-nano",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             response_format={"type": "json_object"}
         )
 
-        gpt_output = response.choices[0].message.content
-        parsed = json.loads(gpt_output)
+        parsed = json.loads(response.choices[0].message.content)
+        print(parsed)
 
+        # Normalize into a list
         if isinstance(parsed, dict) and "questions" in parsed:
             questions = parsed["questions"]
-        else:
+        elif isinstance(parsed, list):
             questions = parsed
-        
-        QUESTIONS[section_id] = questions
+        else:
+            # single question object → wrap in a list
+            questions = [parsed]
 
-        # Optional: validate all entries conform to schema (let FastAPI do it)
+        # Store and return
+        QUESTIONS[section_id] = questions
         return questions
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Question generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Question generation failed: {e}")
+
 
 @app.get("/documents/{doc_id}", response_model=DocumentFullView)
 async def get_document(doc_id: str):
@@ -275,24 +308,89 @@ async def generate_questions_for_all_sections(doc_id: str):
         raise HTTPException(status_code=404, detail="Document not found")
 
     doc = DOCUMENTS[doc_id]
-    sections = doc.get("sections", [])
-    learning_objectives = doc.get("learning_objectives", {})
+    top_sections = doc.get("sections", [])
+    global_learning_objectives = doc.get("learning_objectives", {})
 
-    results = {}
-
-    async with httpx.AsyncClient(base_url="http://127.0.0.1:8000") as client:
-        for i, section in enumerate(sections):
-            section_id = f"{doc_id}_section_{i}"
-            req_body = {
-                "section_text": section["text"],
-                "section_title": section["title"],
-                "num_questions": 2,
-                "learning_objectives": list(learning_objectives.values())
-            }
-            response = await client.post(f"/sections/{section_id}/questions/generate", json=req_body)
-            if response.status_code != 200:
-                results[section_id] = {"error": response.text}
+    # Recursively collect only leaf sections (no sub_sections)
+    def get_leaf_sections(sections: List[Dict], parent_index="") -> List[Tuple[str, Dict]]:
+        leaf_sections = []
+        for i, sec in enumerate(sections):
+            section_id = f"{doc_id}_sec{parent_index}{i}"
+            sub_secs = sec.get("sub_sections", [])
+            if sub_secs:
+                leaf_sections.extend(get_leaf_sections(sub_secs, parent_index=f"{parent_index}{i}_"))
             else:
-                results[section_id] = response.json()
+                leaf_sections.append((section_id, sec))
+        return leaf_sections
+
+    leaf_sections = get_leaf_sections(top_sections)
+    results: Dict[str, Any] = {}
+
+    for section_id, section in leaf_sections:
+        try:
+            section_text = section.get("text", "").strip()
+            if not section_text:
+                results[section_id] = {"error": "No section text found"}
+                continue
+
+            local_learning_objectives = section.get("learning_objectives", [])
+            questions = generate_question_set(
+                section_text=section_text,
+                num_questions=2,
+                local_learning_objectives=local_learning_objectives,
+                learning_objectives=global_learning_objectives
+            )
+
+            QUESTIONS[section_id] = questions
+            results[section_id] = questions
+
+        except Exception as e:
+            results[section_id] = {"error": str(e)}
 
     return results
+
+
+# @app.post("/documents/{doc_id}/questions/generate-all")
+# async def generate_questions_for_all_sections(doc_id: str):
+#     if doc_id not in DOCUMENTS:
+#         raise HTTPException(status_code=404, detail="Document not found")
+
+#     doc = DOCUMENTS[doc_id]
+#     top_sections = doc.get("sections", [])
+#     learning_objectives = list(doc.get("learning_objectives", {}).values())
+
+#     # 1. Flatten the nested section tree into a single list
+#     def flatten_sections(secs: list[dict]) -> list[dict]:
+#         flat = []
+#         for sec in secs:
+#             flat.append(sec)
+#             # Recurse into sub_sections if present
+#             if sec.get("sub_sections"):
+#                 flat.extend(flatten_sections(sec["sub_sections"]))
+#         return flat
+
+#     all_sections = flatten_sections(top_sections)
+
+#     results: dict[str, any] = {}
+#     async with httpx.AsyncClient(base_url="http://127.0.0.1:8000") as client:
+#         for idx, section in enumerate(all_sections):
+#             # Create a unique section_id for storage
+#             section_id = f"{doc_id}_section_{idx}"
+#             req_body = {
+#                 "section_text": section.get("text", ""),
+#                 "section_title": section["title"],
+#                 "num_questions": 2,
+#                 "learning_objectives": learning_objectives
+#             }
+
+#             response = await client.post(
+#                 f"/sections/{section_id}/questions/generate",
+#                 json=req_body
+#             )
+
+#             if response.status_code != 200:
+#                 results[section_id] = {"error": response.text}
+#             else:
+#                 results[section_id] = response.json()
+
+#     return results
