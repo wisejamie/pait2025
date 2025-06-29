@@ -23,6 +23,7 @@ app = FastAPI()
 # In-memory store for now (replace with DB later)
 DOCUMENTS = {}
 QUESTIONS = {}
+QUIZ_SESSIONS = {}
 
 # Pydantic models
 class DocumentInput(BaseModel):
@@ -102,7 +103,6 @@ class DocumentFullView(BaseModel):
     status: str
     sections: Optional[List[Section]]
     learning_objectives: Optional[Dict[str, str]]
-
 
 # Routes
 @app.post("/documents/", response_model=DocumentResponse)
@@ -275,3 +275,195 @@ async def generate_questions_for_all_sections(doc_id: str):
             results[section_id] = {"error": str(e)}
 
     return results
+
+
+# Quiz Session
+class QuizSessionCreateRequest(BaseModel):
+    document_id: str
+    num_questions: Optional[int] = 10
+
+class AnswerSubmission(BaseModel):
+    question_id: str
+    selected_index: int
+
+import random
+from datetime import datetime
+@app.post("/quiz-sessions/")
+async def create_quiz_session(req: QuizSessionCreateRequest):
+    doc_id = req.document_id
+    num_questions = req.num_questions
+
+    if doc_id not in DOCUMENTS:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Gather all questions for this document
+    all_question_ids = []
+    for section_id in QUESTIONS:
+        if section_id.startswith(doc_id):
+            for idx, q in enumerate(QUESTIONS[section_id]):
+                question_id = f"{section_id}_q{idx}"
+                all_question_ids.append((question_id, section_id, q))
+
+    if not all_question_ids:
+        raise HTTPException(status_code=400, detail="No questions found for this document")
+
+    # Randomly select up to num_questions
+    selected = random.sample(all_question_ids, min(num_questions, len(all_question_ids)))
+    selected_ids = [qid for qid, _, _ in selected]
+
+    # Store the session
+    session_id = str(uuid4())
+    QUIZ_SESSIONS[session_id] = {
+        "document_id": doc_id,
+        "question_refs": selected,  # (question_id, section_id, question_obj)
+        "question_ids": selected_ids,
+        "responses": [],
+        "current_index": 0,
+        "start_time": datetime.utcnow().isoformat(),
+        "end_time": None
+    }
+
+    return {
+        "session_id": session_id,
+        "total_questions": len(selected_ids),
+        "status": "active"
+    }
+
+@app.get("/quiz-sessions/{session_id}/next")
+async def get_next_question(session_id: str):
+    if session_id not in QUIZ_SESSIONS:
+        raise HTTPException(status_code=404, detail="Quiz session not found")
+
+    session = QUIZ_SESSIONS[session_id]
+    index = session["current_index"]
+    total = len(session["question_refs"])
+
+    if index >= total:
+        return {"message": "Quiz completed", "finished": True}
+
+    question_id, section_id, question_obj = session["question_refs"][index]
+
+    # Return question data (hide answer metadata)
+    return {
+        "question_id": question_id,
+        "index": index,
+        "total": total,
+        "question": {
+            "question_text": question_obj["question_text"],
+            "options": question_obj["options"]
+        }
+    }
+
+@app.post("/quiz-sessions/{session_id}/answer")
+async def submit_answer(session_id: str, submission: AnswerSubmission):
+    if session_id not in QUIZ_SESSIONS:
+        raise HTTPException(status_code=404, detail="Quiz session not found")
+
+    session = QUIZ_SESSIONS[session_id]
+    index = session["current_index"]
+    total = len(session["question_refs"])
+
+    if index >= total:
+        raise HTTPException(status_code=400, detail="Quiz already completed")
+
+    current_qid, section_id, question_obj = session["question_refs"][index]
+
+    if submission.question_id != current_qid:
+        raise HTTPException(status_code=400, detail="Submitted question does not match current question")
+
+    is_correct = submission.selected_index == question_obj["correct_index"]
+
+    session["responses"].append({
+        "question_id": current_qid,
+        "selected_index": submission.selected_index,
+        "correct": is_correct
+    })
+
+    session["current_index"] += 1
+
+    return {
+        "correct": is_correct,
+        "correct_index": question_obj["correct_index"],
+        "explanation": question_obj.get("explanation", ""),
+        "next_index": session["current_index"],
+        "completed": session["current_index"] >= total
+    }
+
+@app.get("/quiz-sessions/{session_id}/summary")
+async def get_quiz_summary(session_id: str):
+    if session_id not in QUIZ_SESSIONS:
+        raise HTTPException(status_code=404, detail="Quiz session not found")
+
+    session = QUIZ_SESSIONS[session_id]
+    total = len(session["question_refs"])
+    responses = session["responses"]
+
+    if len(responses) < total:
+        return {"message": "Quiz not yet complete", "finished": False}
+
+    num_correct = sum(1 for r in responses if r["correct"])
+    num_incorrect = total - num_correct
+    score_pct = round((num_correct / total) * 100, 2)
+
+    missed_questions = []
+    for i, response in enumerate(responses):
+        if not response["correct"]:
+            qid, section_id, qobj = session["question_refs"][i]
+            missed_questions.append({
+                "question_id": qid,
+                "question_text": qobj["question_text"],
+                "options": qobj["options"],
+                "selected_index": response["selected_index"],
+                "correct_index": qobj["correct_index"],
+                "explanation": qobj.get("explanation", "")
+            })
+
+    return {
+        "total_questions": total,
+        "correct": num_correct,
+        "incorrect": num_incorrect,
+        "score_percent": score_pct,
+        "missed_questions": missed_questions,
+        "finished": True
+    }
+
+
+
+
+# FOR TESTING PURPOSES:
+@app.on_event("startup")
+async def load_test_data():
+    doc_id = "test-doc"
+
+    # Add fake document
+    DOCUMENTS[doc_id] = {
+        "sections": [],
+        "learning_objectives": {
+            "1": "Understand symbolic reasoning",
+            "2": "Recognize patterns in AI models"
+        }
+    }
+
+    # Add fake questions for this doc
+    QUESTIONS[f"{doc_id}_sec0"] = [
+        {
+            "question_text": "What is symbolic reasoning?",
+            "options": ["Rule-based logic", "Random guessing", "Emotional response", "Genetic programming"],
+            "correct_index": 0,
+            "explanation": "Symbolic reasoning uses logical rules and symbols to derive conclusions.",
+            "difficulty_score": 0.3,
+            "concept_tags": ["symbolic reasoning"],
+            "salience": 0.9,
+            "directness": 1.0
+        },
+        {
+            "question_text": "Which of the following best defines pattern recognition in AI?",
+            "options": ["Identifying emotional responses", "Recognizing trends in data", "Following hard-coded rules", "Generating random outcomes"],
+            "correct_index": 1,
+            "explanation": "Pattern recognition refers to identifying trends or structures in data inputs.",
+            "difficulty_score": 0.4,
+            "concept_tags": ["pattern recognition"],
+            "salience": 0.8,
+            "directness": 0.9
+        }
+    ]
