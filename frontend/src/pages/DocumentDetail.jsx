@@ -1,4 +1,4 @@
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import axios from "axios";
 
@@ -10,6 +10,7 @@ export default function DocumentDetail() {
   const [title, setTitle] = useState("");
   const [objectives, setObjectives] = useState({});
   const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
 
   useEffect(() => {
     async function load() {
@@ -66,6 +67,18 @@ export default function DocumentDetail() {
       );
     });
 
+  const startQuiz = async () => {
+    try {
+      const res = await axios.post(`${API_BASE}/quiz-sessions/`, {
+        document_id: id,
+        num_questions: 5,
+      });
+      navigate(`/quiz/${res.data.session_id}`);
+    } catch (err) {
+      console.error("Failed to start quiz:", err);
+    }
+  };
+
   if (loading) return <div className="p-6">Loading document...</div>;
 
   return (
@@ -87,6 +100,29 @@ export default function DocumentDetail() {
 
       <h2 className="text-lg font-semibold mb-2">Sections</h2>
       <ul className="space-y-2">{renderSectionTree(sections)}</ul>
+      <button
+        className="mt-6 px-4 py-2 bg-green-600 text-white rounded"
+        onClick={async () => {
+          try {
+            const res = await fetch(`http://localhost:8000/quiz-sessions/`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ document_id: id, num_questions: 5 }),
+            });
+            const data = await res.json();
+            console.log(data);
+            if (data.session_id) {
+              navigate(`/quiz/${data.session_id}`);
+            } else {
+              alert("Failed to start quiz");
+            }
+          } catch (e) {
+            console.error("Failed to start quiz:", e);
+          }
+        }}
+      >
+        Start Full Quiz
+      </button>
     </div>
   );
 }

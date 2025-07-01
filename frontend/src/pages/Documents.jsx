@@ -32,9 +32,9 @@ export default function Documents() {
       ) : (
         <ul className="space-y-4">
           {documents.map((doc) => (
-            <li key={doc.id} className="p-4 bg-white shadow rounded">
+            <li key={doc.document_id} className="p-4 bg-white shadow rounded">
               <Link
-                to={`/documents/${doc.id}`}
+                to={`/documents/${doc.document_id}`}
                 className="text-blue-600 hover:underline"
               >
                 {doc.title || "Untitled Document"}
