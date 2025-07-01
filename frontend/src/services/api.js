@@ -7,6 +7,31 @@ export const fetchDocuments = async () => {
   return response.data;
 };
 
+export const createDocument = async ({ text, title }) => {
+  const payload = { raw_text: text };
+  if (title) payload.title = title;
+  const { data } = await axios.post(`${API_BASE}/documents/`, payload);
+  return data;
+};
+
+export const uploadDocumentFile = async ({ file, title }) => {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("title", title);
+  const { data } = await axios.post(
+    `${API_BASE}/documents/upload-file`,
+    formData,
+    {
+      headers: { "Content-Type": "multipart/form-data" },
+    }
+  );
+  return data;
+};
+
+export const detectSections = async (docId) => {
+  await axios.post(`${API_BASE}/documents/${docId}/sections/detect`);
+};
+
 export async function getNextQuestion(sessionId) {
   const res = await axios.get(`${API_BASE}/quiz-sessions/${sessionId}/next`);
   return res.data;

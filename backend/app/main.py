@@ -3,16 +3,20 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 from uuid import uuid4
 from typing import Optional, List, Dict, Tuple, Any
-import datetime
+from datetime import datetime
 import os
 import openai
 from dotenv import load_dotenv
 import json
 from app.utils.text_extraction import build_section_extraction_prompt, extract_section_text, SectionExtractionError, extract_text_from_pdf
 from app.utils.question_pipeline import generate_question_set
+from app.models.document_models import *
+from app.models.question_models import *
+from app.models.quiz_models import *
+from app.storage.memory import *
+
 
 from fastapi.middleware.cors import CORSMiddleware
-
 
 # Load environment variables from .env
 load_dotenv()
@@ -31,94 +35,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory store for now (replace with DB later)
-DOCUMENTS = {}
-QUESTIONS = {}
-QUIZ_SESSIONS = {}
-
-# Pydantic models
-class DocumentInput(BaseModel):
-    title: Optional[str] = None
-    raw_text: str
-
-class DocumentResponse(BaseModel):
-    document_id: str
-    status: str  # 'processing', 'ready', or 'error'
-
-class Section(BaseModel):
-    title: str
-    first_sentence: str
-    text: Optional[str] = None
-    sub_sections: Optional[List[Dict]] = []
-
-    class Config:
-        from_attributes = True
-
 Section.update_forward_refs()
-
-class SectionDetectionResponse(BaseModel):
-    sections: List[Section]
-    learning_objectives: Dict[str, str]
-
-
-class DocumentView(BaseModel):
-    document_id: str
-    title: str
-    upload_time: str  # or `datetime` if you want to parse it as datetime object
-
-class Question(BaseModel):
-    question_text: str = Field(..., description="The question prompt")
-    options: List[str] = Field(
-        ..., 
-        min_items=4, 
-        max_items=4, 
-        description="Exactly four answer choices"
-    )
-    correct_index: int = Field(
-        ..., 
-        ge=0, 
-        le=3, 
-        description="Index (0–3) of the correct option"
-    )
-    explanation: str = Field(..., description="One-sentence rationale for the correct answer")
-    difficulty_score: float = Field(
-        ..., 
-        ge=0.0, 
-        le=1.0, 
-        description="0.0 = very easy … 1.0 = very hard"
-    )
-    concept_tags: List[str] = Field(
-        ..., 
-        min_items=1, 
-        max_items=3, 
-        description="1–3 topic tags for the question"
-    )
-    salience: float = Field(
-        ..., 
-        ge=0.0, 
-        le=1.0, 
-        description="0.0 = peripheral … 1.0 = core concept"
-    )
-    directness: float = Field(
-        ..., 
-        ge=0.0, 
-        le=1.0, 
-        description="0.0 = requires inference … 1.0 = stated literally"
-    )
-
-class QuestionGenerationRequest(BaseModel):
-    section_text: str
-    section_title: str
-    num_questions: int = 2  # optional, default to 2
-    learning_objectives: List[str] = []
-
-class DocumentFullView(BaseModel):
-    document_id: str
-    title: Optional[str]
-    raw_text: str
-    status: str
-    sections: Optional[List[Section]]
-    learning_objectives: Optional[Dict[str, str]]
 
 # Routes
 @app.post("/documents/", response_model=DocumentResponse)
@@ -128,10 +45,10 @@ async def upload_document(doc: DocumentInput):
     DOCUMENTS[doc_id] = {
         "title": doc.title,
         "raw_text": doc.raw_text,
-        "upload_time": datetime.datetime.now().isoformat(),
+        "upload_time": datetime.now().isoformat(),
         "status": "processing",
-        "sections": None,
-        "learning_objectives": None,
+        "sections": [],
+        "learning_objectives": {},
     }
     
     return {"document_id": doc_id, "status": "processing"}
@@ -143,7 +60,7 @@ def list_documents():
         {
             "document_id": doc_id,
             "title": doc.get("title", "Untitled"),
-            "upload_time": doc.get("upload_time", datetime.utcnow().isoformat())
+            "upload_time": doc.get("upload_time", datetime.now().isoformat())
         }
         for doc_id, doc in DOCUMENTS.items()
     ]
@@ -227,7 +144,7 @@ async def upload_document_file(file: UploadFile = File(...)):
     DOCUMENTS[doc_id] = {
         "title": file.filename,
         "raw_text": raw_text,
-        "upload_time": datetime.datetime.now().isoformat(),
+        "upload_time": datetime.now().isoformat(),
         "status": "processing",
         "sections": None,
         "learning_objectives": None,
@@ -366,18 +283,7 @@ async def generate_questions_for_all_sections(doc_id: str):
 
     return results
 
-
-# Quiz Session
-class QuizSessionCreateRequest(BaseModel):
-    document_id: str
-    num_questions: Optional[int] = 10
-
-class AnswerSubmission(BaseModel):
-    question_id: str
-    selected_index: int
-
 import random
-from datetime import datetime
 @app.post("/quiz-sessions/")
 async def create_quiz_session(req: QuizSessionCreateRequest):
     doc_id = req.document_id
@@ -414,7 +320,7 @@ async def create_quiz_session(req: QuizSessionCreateRequest):
         "question_ids": selected_ids,
         "responses": [],
         "current_index": 0,
-        "start_time": datetime.utcnow().isoformat(),
+        "start_time": datetime.now().isoformat(),
         "end_time": None
     }
 

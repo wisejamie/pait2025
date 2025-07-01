@@ -1,0 +1,40 @@
+from pydantic import BaseModel, Field
+from typing import Optional, List, Dict
+
+
+class DocumentInput(BaseModel):
+    title: Optional[str] = None
+    raw_text: str
+
+
+class DocumentResponse(BaseModel):
+    document_id: str
+    status: str  # 'processing', 'ready', or 'error'
+
+
+class Section(BaseModel):
+    title: str
+    first_sentence: str
+    text: Optional[str] = None
+    sub_sections: Optional[List[Dict]] = []
+
+    class Config:
+        from_attributes = True
+
+
+class SectionDetectionResponse(BaseModel):
+    sections: List[Section]
+    learning_objectives: Dict[str, str]
+
+
+class DocumentView(BaseModel):
+    document_id: str
+    title: str
+    upload_time: str  # alternatively, use datetime
+
+
+class DocumentFullView(BaseModel):
+    document_id: str
+    title: str
+    sections: List[Section]
+    learning_objectives: Dict[str, str]
