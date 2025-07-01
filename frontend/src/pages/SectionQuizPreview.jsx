@@ -15,7 +15,9 @@ export default function SectionQuizPreview() {
   useEffect(() => {
     async function loadSection() {
       try {
-        const res = await axios.get(`${API_BASE}/sections/${sectionId}`);
+        const res = await axios.get(
+          `${API_BASE}/documents/${docId}/sections/${sectionId}`
+        );
         setSection(res.data);
       } catch (err) {
         console.error("Failed to load section:", err);

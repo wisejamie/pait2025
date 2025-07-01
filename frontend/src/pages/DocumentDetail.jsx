@@ -9,6 +9,8 @@ export default function DocumentDetail() {
   const [sections, setSections] = useState([]);
   const [title, setTitle] = useState("");
   const [objectives, setObjectives] = useState({});
+  const [questions, setQuestions] = useState(null);
+  const [building, setBuilding] = useState(false);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -28,6 +30,11 @@ export default function DocumentDetail() {
         setObjectives(response.learning_objectives || {});
 
         console.log("Fetched sections response:", sectionRes.data);
+        // ➤ fetch existing questions for this document
+        const qRes = await axios.get(`${API_BASE}/documents/${id}/questions`);
+
+        console.log("Fetched questions response:", qRes.data);
+        setQuestions(Array.isArray(qRes.data) ? qRes.data : []);
       } catch (err) {
         console.error("Failed to load document or sections:", err);
       } finally {
@@ -100,29 +107,71 @@ export default function DocumentDetail() {
 
       <h2 className="text-lg font-semibold mb-2">Sections</h2>
       <ul className="space-y-2">{renderSectionTree(sections)}</ul>
-      <button
-        className="mt-6 px-4 py-2 bg-green-600 text-white rounded"
-        onClick={async () => {
-          try {
-            const res = await fetch(`http://localhost:8000/quiz-sessions/`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ document_id: id, num_questions: 5 }),
-            });
-            const data = await res.json();
-            console.log(data);
-            if (data.session_id) {
-              navigate(`/quiz/${data.session_id}`);
-            } else {
-              alert("Failed to start quiz");
+      {/* {questions !== null && questions.length === 0 ? (
+        <button
+          onClick={async () => {
+            setBuilding(true);
+            // trigger generation
+            await axios.post(
+              `${API_BASE}/documents/${id}/questions/generate-all`
+            );
+            // re-fetch questions
+            const { data } = await axios.get(
+              `${API_BASE}/documents/${id}/questions`
+            );
+            setQuestions(Array.isArray(data) ? data : []);
+            setBuilding(false);
+          }}
+          disabled={building}
+          className="mt-6 px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded disabled:opacity-50"
+        >
+          {building ? "Building quiz…" : "Build Quiz"}
+        </button>
+      ) : (
+        <button
+          className="mt-6 px-4 py-2 bg-green-600 text-white rounded"
+          onClick={async () => {
+            try {
+              const res = await axios.post(`${API_BASE}/quiz-sessions/`, {
+                document_id: id,
+                num_questions: 5,
+              });
+              navigate(`/quiz/${res.data.session_id}`);
+            } catch (e) {
+              console.error("Failed to start quiz:", e);
             }
-          } catch (e) {
-            console.error("Failed to start quiz:", e);
-          }
-        }}
-      >
-        Start Full Quiz
-      </button>
+          }}
+        >
+          Start Full Quiz
+        </button>
+      )} */}
+      {/* ➤ if no questions yet, show Build Quiz; else Start Full Quiz */}
+      {questions !== null && questions.length === 0 ? (
+        <button
+          onClick={async () => {
+            setBuilding(true);
+            await axios.post(
+              `${API_BASE}/documents/${id}/questions/generate-all`
+            );
+            const fresh = await axios.get(
+              `${API_BASE}/documents/${id}/questions`
+            );
+            setQuestions(Array.isArray(fresh.data) ? fresh.data : []);
+            setBuilding(false);
+          }}
+          disabled={building}
+          className="mt-6 px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded disabled:opacity-50"
+        >
+          {building ? "Building quiz…" : "Build Quiz"}
+        </button>
+      ) : (
+        <button
+          onClick={startQuiz}
+          className="mt-6 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded"
+        >
+          Start Full Quiz
+        </button>
+      )}
     </div>
   );
 }

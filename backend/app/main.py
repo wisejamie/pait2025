@@ -89,8 +89,8 @@ def get_sections(doc_id: str):
     sections = doc.get("sections", [])
     learning_objectives = doc.get("learning_objectives", {})
 
-    # Ensure section IDs are assigned
-    sections = add_section_ids(sections)
+    # # Ensure section IDs are assigned
+    sections = add_section_ids(sections, doc_id)
 
     return {
         "sections": sections,
@@ -98,10 +98,10 @@ def get_sections(doc_id: str):
     }
 
 
-@app.get("/sections/{section_id}")
-def get_section(section_id: str):
+@app.get("/documents/{doc_id}/sections/{section_id}")
+def get_section(doc_id: str, section_id: str):
     for doc in DOCUMENTS.values():
-        sections = add_section_ids(doc.get("sections", []))
+        sections = doc.get("sections", [])
         flat_sections = flatten_sections(sections)
         for section in flat_sections:
             if section.get("id") == section_id:
@@ -121,13 +121,25 @@ def flatten_sections(sections):
     return flat
 
 
-def add_section_ids(sections):
-    for section in sections:
-        if "id" not in section:
-            section["id"] = str(uuid.uuid4())
-        if "sub_sections" in section:
-            add_section_ids(section["sub_sections"])
+def add_section_ids(
+    sections: List[Dict],
+    doc_id: str,
+    parent_index: str = ""
+) -> List[Dict]:
+    for i, section in enumerate(sections):
+        # Build section ID based on its position
+        section_id = f"{doc_id}_sec{parent_index}{i}"
+        section['id'] = section_id
+
+        # Recurse into any nested subsections
+        sub_secs = section.get('sub_sections')
+        if sub_secs:
+            # Pass along the current index path with a trailing underscore
+            next_parent = f"{parent_index}{i}_"
+            add_section_ids(sub_secs, doc_id, parent_index=next_parent)
+
     return sections
+
 
 @app.post("/documents/upload-file", response_model=DocumentResponse)
 async def upload_document_file(file: UploadFile = File(...), title: str = Form(...)):
@@ -228,8 +240,8 @@ async def get_document_questions(doc_id: str):
     def collect_questions(section_list):
         for section in section_list:
             section_id = section.get("id")
-            if section_id and section_id in QUESTIONS:
-                all_questions.extend(QUESTIONS[section_id])
+            if section_id and f"{section_id}" in QUESTIONS:
+                all_questions.extend(QUESTIONS[f"{section_id}"])
             if "sub_sections" in section:
                 collect_questions(section["sub_sections"])
 
@@ -275,7 +287,7 @@ async def generate_questions_for_all_sections(doc_id: str):
                 learning_objectives=global_learning_objectives
             )
 
-            QUESTIONS[section_id] = questions
+            QUESTIONS[f"{section_id}"] = questions
             results[section_id] = questions
 
         except Exception as e:
@@ -445,7 +457,8 @@ async def load_test_data():
             "title": "Introduction to AI Comprehension",
             "first_sentence": "This is a sample document about how AI models comprehend text.",
             "text": "This is a sample document about how AI models comprehend text. It contains one section with meaningful content.",
-            "sub_sections": []
+            "sub_sections": [],
+            "id":"sec0"
             }
         ],
         "learning_objectives": {
@@ -456,7 +469,11 @@ async def load_test_data():
 
 
     # Add fake questions for this doc
-    QUESTIONS[f"{doc_id}_sec0"] = [
+    doc = DOCUMENTS.get(doc_id)
+    sections = doc.get("sections", [])
+    for section in sections:
+        section_id = section.get("id")
+    QUESTIONS[f"{doc_id}_{section_id}"] = [
         {
             "question_text": "What is the main topic of the document?",
             "options": [

@@ -40,6 +40,18 @@ export const detectSections = async (docId) => {
   await axios.post(`${API_BASE}/documents/${docId}/sections/detect`);
 };
 
+export const fetchQuestions = async (docId) => {
+  const { data } = await axios.get(`${API_BASE}/documents/${docId}/questions`);
+  return data;
+};
+
+export const generateAllQuestions = async (docId) => {
+  const { data } = await axios.post(
+    `${API_BASE}/documents/${docId}/questions/generate-all`
+  );
+  return data;
+};
+
 export async function getNextQuestion(sessionId) {
   const res = await axios.get(`${API_BASE}/quiz-sessions/${sessionId}/next`);
   return res.data;
