@@ -1,5 +1,5 @@
 import uuid
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from uuid import uuid4
 from typing import Optional, List, Dict, Tuple, Any
@@ -130,7 +130,7 @@ def add_section_ids(sections):
     return sections
 
 @app.post("/documents/upload-file", response_model=DocumentResponse)
-async def upload_document_file(file: UploadFile = File(...)):
+async def upload_document_file(file: UploadFile = File(...), title: str = Form(...)):
     # Check file type
     if file.content_type == "application/pdf":
         raw_text = extract_text_from_pdf(file.file)
@@ -142,7 +142,7 @@ async def upload_document_file(file: UploadFile = File(...)):
 
     doc_id = str(uuid4())
     DOCUMENTS[doc_id] = {
-        "title": file.filename,
+        "title": title,
         "raw_text": raw_text,
         "upload_time": datetime.now().isoformat(),
         "status": "processing",

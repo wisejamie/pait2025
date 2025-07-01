@@ -14,18 +14,26 @@ export const createDocument = async ({ text, title }) => {
   return data;
 };
 
-export const uploadDocumentFile = async ({ file, title }) => {
+export const uploadDocumentFile = async (file, title) => {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("title", title);
-  const { data } = await axios.post(
-    `${API_BASE}/documents/upload-file`,
-    formData,
-    {
-      headers: { "Content-Type": "multipart/form-data" },
-    }
-  );
-  return data;
+
+  const resp = await fetch(`${API_BASE}/documents/upload-file`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(
+      `Upload failed (${resp.status}): ${
+        err.detail?.[0]?.msg || resp.statusText
+      }`
+    );
+  }
+
+  return await resp.json();
 };
 
 export const detectSections = async (docId) => {
