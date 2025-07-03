@@ -11,23 +11,24 @@ export default function QuizView() {
   const [submitted, setSubmitted] = useState(false);
   const [feedback, setFeedback] = useState(null);
 
-  useEffect(() => {
-    async function fetchNext() {
-      try {
-        const data = await getNextQuestion(sessionId);
-        if (data.finished) {
-          navigate(`/quiz/${sessionId}/summary`);
-        } else {
-          setQuestionData(data);
-          setSelected(null);
-          setSubmitted(false);
-          setFeedback(null);
-        }
-      } catch (err) {
-        console.error("Error fetching question:", err);
+  const fetchNextQuestion = async () => {
+    try {
+      const data = await getNextQuestion(sessionId);
+      if (data.finished) {
+        navigate(`/quiz/${sessionId}/summary`);
+      } else {
+        setQuestionData(data);
+        setSelected(null);
+        setSubmitted(false);
+        setFeedback(null);
       }
+    } catch (err) {
+      console.error("Error fetching question:", err);
     }
-    fetchNext();
+  };
+
+  useEffect(() => {
+    fetchNextQuestion();
   }, [sessionId]);
 
   async function handleSubmit() {
@@ -40,12 +41,6 @@ export default function QuizView() {
 
     setFeedback(response);
     setSubmitted(true);
-
-    if (response.completed) {
-      setTimeout(() => navigate(`/quiz/${sessionId}/summary`), 2000);
-    } else {
-      setTimeout(() => window.location.reload(), 1500); // simplistic
-    }
   }
 
   if (!questionData) return <p>Loading question...</p>;
@@ -76,6 +71,24 @@ export default function QuizView() {
       >
         Submit
       </button>
+
+      {submitted && !feedback?.completed && (
+        <button
+          onClick={fetchNextQuestion}
+          className="mt-4 ml-4 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded"
+        >
+          Next Question
+        </button>
+      )}
+
+      {feedback?.completed && (
+        <button
+          onClick={() => navigate(`/quiz/${sessionId}/summary`)}
+          className="mt-4 ml-4 px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded"
+        >
+          View Summary
+        </button>
+      )}
 
       {feedback && (
         <div className="mt-4 p-4 rounded bg-gray-100">

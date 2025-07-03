@@ -107,45 +107,6 @@ export default function DocumentDetail() {
 
       <h2 className="text-lg font-semibold mb-2">Sections</h2>
       <ul className="space-y-2">{renderSectionTree(sections)}</ul>
-      {/* {questions !== null && questions.length === 0 ? (
-        <button
-          onClick={async () => {
-            setBuilding(true);
-            // trigger generation
-            await axios.post(
-              `${API_BASE}/documents/${id}/questions/generate-all`
-            );
-            // re-fetch questions
-            const { data } = await axios.get(
-              `${API_BASE}/documents/${id}/questions`
-            );
-            setQuestions(Array.isArray(data) ? data : []);
-            setBuilding(false);
-          }}
-          disabled={building}
-          className="mt-6 px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded disabled:opacity-50"
-        >
-          {building ? "Building quiz…" : "Build Quiz"}
-        </button>
-      ) : (
-        <button
-          className="mt-6 px-4 py-2 bg-green-600 text-white rounded"
-          onClick={async () => {
-            try {
-              const res = await axios.post(`${API_BASE}/quiz-sessions/`, {
-                document_id: id,
-                num_questions: 5,
-              });
-              navigate(`/quiz/${res.data.session_id}`);
-            } catch (e) {
-              console.error("Failed to start quiz:", e);
-            }
-          }}
-        >
-          Start Full Quiz
-        </button>
-      )} */}
-      {/* ➤ if no questions yet, show Build Quiz; else Start Full Quiz */}
       {questions !== null && questions.length === 0 ? (
         <button
           onClick={async () => {
