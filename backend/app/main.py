@@ -308,12 +308,20 @@ async def create_quiz_session(req: QuizSessionCreateRequest):
         raise HTTPException(status_code=404, detail="Document not found")
 
     all_question_ids = []
-    for sec in sections:
-        key = f"{sec}"
-        qs = QUESTIONS.get(key, [])
-        for idx, q in enumerate(qs):
-            question_id = f"{key}_q{idx}"
-            all_question_ids.append((question_id, sec, q))
+    if sections:
+        for sec in sections:
+            key = f"{sec}"
+            qs = QUESTIONS.get(key, [])
+            for idx, q in enumerate(qs):
+                question_id = f"{key}_q{idx}"
+                all_question_ids.append((question_id, sec, q))
+    
+    else:
+        for section_id, questions in QUESTIONS.items():
+            if section_id.startswith(doc_id):
+                for idx, q in enumerate(questions):
+                    question_id = f"{section_id}_q{idx}"
+                    all_question_ids.append((question_id, section_id, q))
     
     if not all_question_ids:
         raise HTTPException(
@@ -321,11 +329,11 @@ async def create_quiz_session(req: QuizSessionCreateRequest):
             detail="No questions available for the selected sections."
         )
 
-    # 2) validate num_questions
+    # validate num_questions
     if num_questions < 1:
         raise HTTPException(400, "num_questions out of range.")
 
-        # ── Randomly sample the desired number
+    # ── Randomly sample the desired number
     selected = random.sample(all_question_ids, min(num_questions, len(all_question_ids)))
 
     # ── Extract IDs and question bodies for session storage
