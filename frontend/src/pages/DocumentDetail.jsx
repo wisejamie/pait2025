@@ -195,7 +195,7 @@ export default function DocumentDetail() {
         </button>
       )}
       {/* if customization is off, show the old Start button */}
-      {!isCustomizeOpen && (
+      {questions !== null && questions.length > 0 && !isCustomizeOpen && (
         <button
           onClick={() => setCustomizeOpen(true)}
           className="mt-6 px-4 py-2 bg-blue-600 text-white rounded"
