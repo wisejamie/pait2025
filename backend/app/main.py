@@ -300,29 +300,37 @@ import random
 async def create_quiz_session(req: QuizSessionCreateRequest):
     doc_id = req.document_id
     num_questions = req.num_questions
+    sections = req.sections
 
     print(doc_id)
-    print(DOCUMENTS)
+    # print(DOCUMENTS)
     if doc_id not in DOCUMENTS:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Gather all questions for this document
     all_question_ids = []
-
-    question_source = QUESTIONS.copy()
-
-    for section_id, questions in question_source.items():
-        if section_id.startswith(doc_id):
-            for idx, q in enumerate(questions):
-                question_id = f"{section_id}_q{idx}"
-                all_question_ids.append((question_id, section_id, q))
-
+    for sec in sections:
+        key = f"{sec}"
+        qs = QUESTIONS.get(key, [])
+        for idx, q in enumerate(qs):
+            question_id = f"{key}_q{idx}"
+            all_question_ids.append((question_id, sec, q))
+    
     if not all_question_ids:
-        raise HTTPException(status_code=400, detail="No questions found for this document")
+        raise HTTPException(
+            status_code=400,
+            detail="No questions available for the selected sections."
+        )
 
-    # Randomly select up to num_questions
+    # 2) validate num_questions
+    if num_questions < 1:
+        raise HTTPException(400, "num_questions out of range.")
+
+        # ── Randomly sample the desired number
     selected = random.sample(all_question_ids, min(num_questions, len(all_question_ids)))
+
+    # ── Extract IDs and question bodies for session storage
     selected_ids = [qid for qid, _, _ in selected]
+    session_questions = { qid: qdict for qid, _, qdict in selected }
 
     # Store the session
     session_id = str(uuid4())

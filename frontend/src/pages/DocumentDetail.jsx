@@ -6,6 +6,10 @@ const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 export default function DocumentDetail() {
   const { id } = useParams();
+  const [selectedSections, setSelectedSections] = useState([]);
+  const [questionCount, setQuestionCount] = useState(5);
+  const [allQuestionsCount, setAllQuestionsCount] = useState(0);
+  const [isCustomizeOpen, setCustomizeOpen] = useState(false);
   const [sections, setSections] = useState([]);
   const [title, setTitle] = useState("");
   const [objectives, setObjectives] = useState({});
@@ -13,6 +17,16 @@ export default function DocumentDetail() {
   const [building, setBuilding] = useState(false);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
+
+  const getDescendantIds = (section) => {
+    let ids = [section.id];
+    if (section.sub_sections) {
+      section.sub_sections.forEach((sub) => {
+        ids = ids.concat(getDescendantIds(sub));
+      });
+    }
+    return ids;
+  };
 
   useEffect(() => {
     async function load() {
@@ -33,8 +47,20 @@ export default function DocumentDetail() {
         // ➤ fetch existing questions for this document
         const qRes = await axios.get(`${API_BASE}/documents/${id}/questions`);
 
+        setAllQuestionsCount(qRes.data.length);
+
         console.log("Fetched questions response:", qRes.data);
         setQuestions(Array.isArray(qRes.data) ? qRes.data : []);
+
+        const allIds = [];
+        const collect = (secs) => {
+          secs.forEach((s) => {
+            allIds.push(s.id);
+            if (s.sub_sections) collect(s.sub_sections);
+          });
+        };
+        collect(response.sections || []);
+        setSelectedSections(allIds);
       } catch (err) {
         console.error("Failed to load document or sections:", err);
       } finally {
@@ -88,6 +114,41 @@ export default function DocumentDetail() {
 
   if (loading) return <div className="p-6">Loading document...</div>;
 
+  const renderCheckboxTree = (section, depth = 0) => {
+    const ids = getDescendantIds(section);
+    const allSelected = ids.every((id) => selectedSections.includes(id));
+    return (
+      <div
+        key={section.id}
+        style={{ paddingLeft: depth * 16 }}
+        className="mb-1"
+      >
+        <label className="flex items-center">
+          <input
+            type="checkbox"
+            checked={allSelected}
+            onChange={(e) => {
+              if (e.target.checked) {
+                // add this section + all descendants
+                setSelectedSections((prev) =>
+                  Array.from(new Set([...prev, ...ids]))
+                );
+              } else {
+                // remove this section + all descendants
+                setSelectedSections((prev) =>
+                  prev.filter((id) => !ids.includes(id))
+                );
+              }
+            }}
+            className="mr-2"
+          />
+          {section.title}
+        </label>
+        {section.sub_sections?.map((sub) => renderCheckboxTree(sub, depth + 1))}
+      </div>
+    );
+  };
+
   return (
     <div className="p-6">
       <h1 className="text-2xl font-bold mb-4">📘 {title}</h1>
@@ -132,6 +193,76 @@ export default function DocumentDetail() {
         >
           Start Full Quiz
         </button>
+      )}
+      {/* if customization is off, show the old Start button */}
+      {!isCustomizeOpen && (
+        <button
+          onClick={() => setCustomizeOpen(true)}
+          className="mt-6 px-4 py-2 bg-blue-600 text-white rounded"
+        >
+          Customize Quiz
+        </button>
+      )}
+
+      {/* Modal */}
+      {isCustomizeOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center">
+          <div className="bg-white p-6 rounded shadow-lg w-full max-w-md">
+            <h2 className="text-xl font-semibold mb-4">Customize Quiz</h2>
+
+            {/* Section selector (recursive tree) */}
+            <div className="mb-4 max-h-64 overflow-y-auto border p-2 rounded">
+              {sections.map((sec) => renderCheckboxTree(sec))}
+            </div>
+
+            {/* Question count */}
+            <div className="mb-4">
+              <label className="block mb-1">
+                Number of questions (1–{allQuestionsCount}):
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={allQuestionsCount}
+                value={questionCount}
+                onChange={(e) => setQuestionCount(+e.target.value)}
+                className="border p-1 w-20"
+              />
+            </div>
+
+            {/* Actions */}
+            <div className="flex justify-end space-x-2">
+              <button
+                onClick={() => setCustomizeOpen(false)}
+                className="px-4 py-2 bg-gray-200 rounded"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={
+                  questionCount < 1 ||
+                  questionCount > allQuestionsCount ||
+                  selectedSections.length === 0
+                }
+                onClick={async () => {
+                  // POST create session
+                  const { data } = await axios.post(
+                    `${API_BASE}/quiz-sessions/`,
+                    {
+                      document_id: id,
+                      num_questions: questionCount,
+                      sections: selectedSections,
+                    }
+                  );
+                  navigate(`/quiz/${data.session_id}`);
+                }}
+                className="px-4 py-2 bg-green-600 text-white rounded disabled:opacity-50"
+              >
+                Start Quiz
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

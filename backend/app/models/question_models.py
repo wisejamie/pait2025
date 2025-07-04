@@ -3,6 +3,7 @@ from typing import List
 
 
 class Question(BaseModel):
+    # question_id: str              # might be a good idea to have this as key
     question_text: str = Field(..., description="The question prompt")
     options: List[str] = Field(
         ..., 
