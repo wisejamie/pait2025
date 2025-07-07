@@ -418,6 +418,22 @@ async def submit_answer(session_id: str, submission: AnswerSubmission):
         "completed": session["current_index"] >= total
     }
 
+# ── helper to find a section’s title by its ID
+def lookup_section_title(doc_id: str, section_id: str) -> str:
+    doc = DOCUMENTS.get(doc_id, {})
+    sections = doc.get("sections", [])
+
+    def recurse(secs):
+        for sec in secs:
+            if sec["id"] == section_id:
+                return sec["title"]
+            title = recurse(sec.get("sub_sections", []))
+            if title:
+                return title
+        return None
+
+    return recurse(sections) or section_id
+
 @app.get("/quiz-sessions/{session_id}/summary")
 async def get_quiz_summary(session_id: str):
     if session_id not in QUIZ_SESSIONS:
@@ -433,6 +449,28 @@ async def get_quiz_summary(session_id: str):
     num_correct = sum(1 for r in responses if r["correct"])
     num_incorrect = total - num_correct
     score_pct = round((num_correct / total) * 100, 2)
+
+     # ── compute per‐section stats
+    section_stats: Dict[str, Dict[str,int]] = {}
+    for idx, response in enumerate(responses):
+        _, section_id, _ = session["question_refs"][idx]
+        stats = section_stats.setdefault(section_id, {"total": 0, "correct": 0})
+        stats["total"] += 1
+        if response["correct"]:
+            stats["correct"] += 1
+
+    section_scores = []
+    for section_id, stats in section_stats.items():
+        total_sec = stats["total"]
+        correct_sec = stats["correct"]
+        section_scores.append({
+            "section_id": section_id,
+            "section_title": lookup_section_title(session["document_id"], section_id),
+            "correct": correct_sec,
+            "incorrect": total_sec - correct_sec,
+            "total": total_sec,
+            "percent": round((correct_sec / total_sec) * 100, 2)
+        })
 
     missed_questions = []
     for i, response in enumerate(responses):
@@ -452,8 +490,10 @@ async def get_quiz_summary(session_id: str):
         "correct": num_correct,
         "incorrect": num_incorrect,
         "score_percent": score_pct,
+        "section_scores": section_scores,
         "missed_questions": missed_questions,
-        "finished": True
+        "finished": True,
+        "document_id": session["document_id"] 
     }
 
 
