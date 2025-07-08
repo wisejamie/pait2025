@@ -2,6 +2,8 @@ import re
 from rapidfuzz import fuzz
 import io
 import PyPDF2
+from app.utils.text_cleaning import clean_text
+import fitz
 
 class SectionExtractionError(Exception):
     """Raised when section text could not be extracted reliably."""
@@ -170,13 +172,32 @@ def extract_section_text(article_text: str, sections: list) -> list:
     return sections
 
 
-def extract_text_from_pdf(file) -> str:
-    """Extracts all text from a PDF file-like object."""
-    with io.BytesIO(file.read()) as file_stream:
-        reader = PyPDF2.PdfReader(file_stream)
-        text = ''
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + '\n'
-    return text
+# def extract_text_from_pdf(file) -> str:
+#     """Extracts all text from a PDF file-like object."""
+#     with io.BytesIO(file.read()) as file_stream:
+#         reader = PyPDF2.PdfReader(file_stream)
+#         text = ''
+#         for page in reader.pages:
+#             page_text = page.extract_text()
+#             if page_text:
+#                 text += page_text + '\n'
+#     text = clean_text(text)
+#     return text
+def extract_text_from_pdf(file):
+    """
+    Extracts raw text from a PDF using PyMuPDF.
+    Attempts to preserve paragraph structure by pulling text block-wise from each page.
+    """
+    file_bytes = file.read()  # Read file contents into bytes
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    text_blocks = []
+
+    for page_num, page in enumerate(doc, start=1):
+        # Use layout-aware text extraction
+        page_text = page.get_text("text")
+        text_blocks.append(page_text.strip())
+
+    # Combine pages with double newlines to encourage paragraph breaks
+    full_text = "\n\n".join(text_blocks)
+    full_text = clean_text(full_text)
+    return full_text

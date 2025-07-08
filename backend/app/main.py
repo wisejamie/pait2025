@@ -9,6 +9,7 @@ import openai
 from dotenv import load_dotenv
 import json
 from app.utils.text_extraction import build_section_extraction_prompt, extract_section_text, SectionExtractionError, extract_text_from_pdf
+# from app.utils.text_extraction import build_section_extraction_prompt, extract_section_text, SectionExtractionError
 from app.utils.question_pipeline import generate_question_set
 from app.models.document_models import *
 from app.models.question_models import *
@@ -495,7 +496,6 @@ async def get_quiz_summary(session_id: str):
         "finished": True,
         "document_id": session["document_id"] 
     }
-
 
 # FOR TESTING PURPOSES:
 @app.on_event("startup")
