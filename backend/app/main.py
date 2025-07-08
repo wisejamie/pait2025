@@ -1,4 +1,5 @@
 import uuid
+from app.utils.prompt_templates import build_summary_prompt
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from uuid import uuid4
@@ -496,6 +497,39 @@ async def get_quiz_summary(session_id: str):
         "finished": True,
         "document_id": session["document_id"] 
     }
+
+
+import traceback
+@app.post(
+    "/documents/{doc_id}/sections/{section_id}/summarize",
+    response_model=SummaryResponse,
+)
+async def summarize_section(doc_id: str, section_id: str, req: SummaryRequest):
+    try:
+        section = get_section(doc_id, section_id)
+        if not section:
+            raise HTTPException(status_code=404, detail="Section not found")
+
+        section_text = section.get("text")
+        if not section_text:
+            raise HTTPException(status_code=500, detail="Section has no text")
+
+        prompt = build_summary_prompt(section_text, req.level)
+        response = client.chat.completions.create(
+            model="gpt-4.1-nano",
+            messages=[
+                {"role": "system", "content": "You are a helpful academic assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.5,
+        )
+        summary = response.choices[0].message.content
+        return SummaryResponse(summary=summary)
+
+    except Exception as e:
+        print(traceback.format_exc(), flush=True)
+        raise
+
 
 # FOR TESTING PURPOSES:
 @app.on_event("startup")

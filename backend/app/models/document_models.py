@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Literal
 
 
 class DocumentInput(BaseModel):
@@ -38,3 +38,10 @@ class DocumentFullView(BaseModel):
     title: str
     sections: List[Section]
     learning_objectives: Dict[str, str]
+    
+
+class SummaryRequest(BaseModel):
+    level: Literal["tldr", "short", "bullets", "simple"]
+
+class SummaryResponse(BaseModel):
+    summary: str

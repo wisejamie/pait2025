@@ -13,6 +13,12 @@ export default function SectionQuizPreview() {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
 
+  // Summarization state
+  const [summaryLevel, setSummaryLevel] = useState("tldr");
+  const [summary, setSummary] = useState("");
+  const [loadingSummary, setLoadingSummary] = useState(false);
+  const [summaryError, setSummaryError] = useState("");
+
   useEffect(() => {
     async function loadSection() {
       try {
@@ -25,7 +31,6 @@ export default function SectionQuizPreview() {
           .get(`${API_BASE}/documents/${docId}/sections`)
           .then((r) => (Array.isArray(r.data) ? r.data : [r.data]));
 
-        // flatten in-order: parent then its subsections
         const ordered = [];
         const walk = (secs) => {
           secs.forEach((s) => {
@@ -41,20 +46,36 @@ export default function SectionQuizPreview() {
         setLoading(false);
       }
     }
-
     loadSection();
-  }, [sectionId]);
+  }, [docId, sectionId]);
 
   const generateQuestions = async () => {
     try {
       setGenerating(true);
       await axios.post(`${API_BASE}/sections/${sectionId}/questions/generate`);
-      navigate(`/quiz/session-mock-${sectionId}`); // Replace with real session route when ready
+      navigate(`/quiz/session-mock-${sectionId}`);
     } catch (err) {
       console.error("Failed to generate questions:", err);
       alert("Failed to generate questions. Try again.");
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const fetchSummary = async () => {
+    setLoadingSummary(true);
+    setSummaryError("");
+    try {
+      const res = await axios.post(
+        `${API_BASE}/documents/${docId}/sections/${sectionId}/summarize`,
+        { level: summaryLevel }
+      );
+      setSummary(res.data.summary);
+    } catch (err) {
+      console.error("Error fetching summary:", err);
+      setSummaryError("Failed to fetch summary. Please try again.");
+    } finally {
+      setLoadingSummary(false);
     }
   };
 
@@ -68,6 +89,37 @@ export default function SectionQuizPreview() {
   return (
     <div className="p-6">
       <h2 className="text-2xl font-bold mb-4">{section.title}</h2>
+
+      {/* Summarization controls */}
+      <div className="mb-4 flex items-center space-x-2">
+        <select
+          value={summaryLevel}
+          onChange={(e) => setSummaryLevel(e.target.value)}
+          className="p-1 border rounded"
+        >
+          <option value="tldr">TL;DR</option>
+          <option value="short">Short</option>
+          <option value="bullets">Bullets</option>
+          <option value="simple">Simple</option>
+        </select>
+        <button
+          onClick={fetchSummary}
+          disabled={loadingSummary}
+          className="bg-green-600 text-white px-3 py-1 rounded hover:bg-green-700 disabled:opacity-50"
+        >
+          {loadingSummary ? "Loading..." : "Get Summary"}
+        </button>
+      </div>
+
+      {/* Display summary if available */}
+      {summary && (
+        <div className="bg-green-50 border-l-4 border-green-400 p-4 mb-4 whitespace-pre-wrap">
+          {summary}
+        </div>
+      )}
+      {summaryError && <div className="text-red-600 mb-4">{summaryError}</div>}
+
+      {/* Section text */}
       <div className="space-y-4">
         {section.text &&
           section.text
@@ -75,13 +127,16 @@ export default function SectionQuizPreview() {
             .map((para, index) => <p key={index}>{para}</p>)}
       </div>
 
+      {/* Quiz button */}
       <button
         onClick={generateQuestions}
         disabled={generating}
-        className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+        className="mt-4 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
       >
         {generating ? "Generating..." : "Start Quiz"}
       </button>
+
+      {/* Navigation links */}
       <div className="mt-8 flex justify-between">
         {prev ? (
           <Link
@@ -93,14 +148,15 @@ export default function SectionQuizPreview() {
         ) : (
           <span />
         )}
-
-        {next && (
+        {next ? (
           <Link
             to={`/documents/${docId}/sections/${next.id}`}
             className="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded"
           >
             {next.title} →
           </Link>
+        ) : (
+          <span />
         )}
       </div>
     </div>
