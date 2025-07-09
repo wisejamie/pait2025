@@ -1,5 +1,5 @@
 import uuid
-from app.utils.prompt_templates import build_summary_prompt
+from app.utils.prompt_templates import build_summary_prompt, build_transform_prompt
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from uuid import uuid4
@@ -530,6 +530,88 @@ async def summarize_section(doc_id: str, section_id: str, req: SummaryRequest):
         print(traceback.format_exc(), flush=True)
         raise
 
+# Simple in-memory cache. Keyed by (doc_id, section_id).
+# simplify_cache: Dict[Tuple[str, str], str] = {}
+
+# @app.post(
+#     "/documents/{doc_id}/sections/{section_id}/simplify",
+#     response_model=SimplifyResponse,
+# )
+# async def simplify_section(doc_id: str, section_id: str):
+#     # 1. Return cached if available
+#     cache_key = (doc_id, section_id)
+#     if cache_key in simplify_cache:
+#         return SimplifyResponse(simplifiedText=simplify_cache[cache_key])
+
+#     # 2. Lookup the section (reusing your existing logic)
+#     try:
+#         section = get_section(doc_id, section_id)
+#     except HTTPException as e:
+#         # Propagate 404 if section not found
+#         raise e
+
+#     text = section.get("text")
+#     if not text:
+#         raise HTTPException(status_code=500, detail="Section has no text to simplify")
+
+#     # 3. Build prompt & call GPT
+#     prompt = build_simplify_prompt(text)
+#     response = client.chat.completions.create(
+#             model="gpt-4.1-nano",
+#             messages=[
+#                 {"role": "system", "content": "You are a helpful academic assistant."},
+#                 {"role": "user", "content": prompt}
+#             ],
+#             temperature=0.5,
+#         )
+#     simplified = response.choices[0].message.content
+
+#     # 4. Cache and return
+#     simplify_cache[cache_key] = simplified
+#     return SimplifyResponse(simplifiedText=simplified)
+
+
+transform_cache: Dict[Tuple[str, str, str], str] = {}
+
+@app.post(
+    "/documents/{doc_id}/sections/{section_id}/transform",
+    response_model=TransformResponse,
+)
+async def transform_section(
+    doc_id: str,
+    section_id: str,
+    req: TransformRequest,
+):
+    # 1) return cached result if available
+    cache_key = (doc_id, section_id, req.mode)
+    if cache_key in transform_cache:
+        return TransformResponse(transformedText=transform_cache[cache_key])
+
+    # 2) fetch section via existing logic
+    try:
+        section = get_section(doc_id, section_id)
+    except HTTPException as e:
+        raise e
+
+    text = section.get("text")
+    if not text:
+        raise HTTPException(status_code=500, detail="Section has no text to transform")
+
+    # 3) build prompt and call GPT
+    prompt = build_transform_prompt(text, req.mode)
+    response = client.chat.completions.create(
+            model="gpt-4.1-nano",
+            messages=[
+                {"role": "system", "content": "You are a helpful academic assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.5,
+        )
+    simplified = response.choices[0].message.content
+
+    # 4) cache and return
+    transform_cache[cache_key] = simplified
+    return TransformResponse(transformedText=simplified)
 
 # FOR TESTING PURPOSES:
 @app.on_event("startup")

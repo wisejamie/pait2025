@@ -1,6 +1,8 @@
+import React, { useEffect, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { useEffect, useState } from "react";
 import axios from "axios";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -19,6 +21,28 @@ export default function SectionQuizPreview() {
   const [loadingSummary, setLoadingSummary] = useState(false);
   const [summaryError, setSummaryError] = useState("");
 
+  // Transformation state (view modes)
+  const [viewMode, setViewMode] = useState("original");
+  const [transformedTexts, setTransformedTexts] = useState({
+    simplify: "",
+    elaborate: "",
+    distill: "",
+  });
+  const [loadingTransform, setLoadingTransform] = useState(false);
+  const [transformError, setTransformError] = useState("");
+
+  // Descriptions for each mode
+  const modeDescriptions = {
+    original:
+      "Original: full scholarly prose, contains complete details and academic language.",
+    simplify:
+      "Simplified: easier-to-read language while preserving meaning and structure.",
+    elaborate:
+      "Elaborated: adds brief explanations or examples for technical terms and complex ideas.",
+    distill:
+      "Distilled: only the core ideas and arguments, with supporting details removed for conciseness.",
+  };
+
   useEffect(() => {
     async function loadSection() {
       try {
@@ -27,9 +51,12 @@ export default function SectionQuizPreview() {
         );
         setSection(res.data);
 
-        const tree = await axios
-          .get(`${API_BASE}/documents/${docId}/sections`)
-          .then((r) => (Array.isArray(r.data) ? r.data : [r.data]));
+        const treeRes = await axios.get(
+          `${API_BASE}/documents/${docId}/sections`
+        );
+        const treeData = Array.isArray(treeRes.data)
+          ? treeRes.data
+          : [treeRes.data];
 
         const ordered = [];
         const walk = (secs) => {
@@ -38,7 +65,7 @@ export default function SectionQuizPreview() {
             if (s.sub_sections?.length) walk(s.sub_sections);
           });
         };
-        walk(tree[0].sections || tree);
+        walk(treeData[0].sections || treeData);
         setAllSections(ordered);
       } catch (err) {
         console.error("Failed to load section:", err);
@@ -79,6 +106,30 @@ export default function SectionQuizPreview() {
     }
   };
 
+  const handleTransform = async (mode) => {
+    setTransformError("");
+    if (!transformedTexts[mode]) {
+      setLoadingTransform(true);
+      try {
+        const res = await axios.post(
+          `${API_BASE}/documents/${docId}/sections/${sectionId}/transform`,
+          { mode }
+        );
+        setTransformedTexts((prev) => ({
+          ...prev,
+          [mode]: res.data.transformedText,
+        }));
+      } catch (err) {
+        console.error(`Error transforming text (${mode}):`, err);
+        setTransformError("Failed to transform text. Please try again.");
+        return;
+      } finally {
+        setLoadingTransform(false);
+      }
+    }
+    setViewMode(mode);
+  };
+
   if (loading) return <div className="p-6">Loading section...</div>;
   if (!section) return <div className="p-6">Section not found.</div>;
 
@@ -86,9 +137,54 @@ export default function SectionQuizPreview() {
   const prev = idx > 0 ? allSections[idx - 1] : null;
   const next = idx < allSections.length - 1 ? allSections[idx + 1] : null;
 
+  // Determine display text
+  const displayText =
+    viewMode === "original" ? section.text : transformedTexts[viewMode];
+
+  // Normalize paragraph breaks for markdown rendering
+  // Only normalize for original mode to preserve tables in transformed modes
+  const markdownText =
+    viewMode === "original"
+      ? displayText
+          .split(/\n\s*\n+/)
+          .filter((para) => para.trim() !== "")
+          .join("\n\n")
+      : displayText;
+
   return (
     <div className="p-6">
       <h2 className="text-2xl font-bold mb-4">{section.title}</h2>
+
+      {/* View As control */}
+      <div className="mb-4">
+        <label htmlFor="viewMode" className="font-medium mr-2">
+          View As:
+        </label>
+        <select
+          id="viewMode"
+          value={viewMode}
+          onChange={async (e) => {
+            const mode = e.target.value;
+            if (mode === "original") {
+              setViewMode("original");
+            } else {
+              await handleTransform(mode);
+            }
+          }}
+          className="px-2 py-1 border rounded"
+        >
+          <option value="original">Original</option>
+          <option value="simplify">Simplified</option>
+          <option value="elaborate">Elaborated</option>
+          <option value="distill">Distilled</option>
+        </select>
+        <div className="mt-2 text-gray-600 text-sm">
+          {modeDescriptions[viewMode]}
+        </div>
+        {transformError && (
+          <div className="text-red-600 mt-1">{transformError}</div>
+        )}
+      </div>
 
       {/* Summarization controls */}
       <div className="mb-4 flex items-center space-x-2">
@@ -119,12 +215,11 @@ export default function SectionQuizPreview() {
       )}
       {summaryError && <div className="text-red-600 mb-4">{summaryError}</div>}
 
-      {/* Section text */}
-      <div className="space-y-4">
-        {section.text &&
-          section.text
-            .split("\n")
-            .map((para, index) => <p key={index}>{para}</p>)}
+      {/* Section text rendered as markdown */}
+      <div className="prose max-w-none mb-6">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          {markdownText}
+        </ReactMarkdown>
       </div>
 
       {/* Quiz button */}

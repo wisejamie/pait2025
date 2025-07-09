@@ -38,10 +38,16 @@ class DocumentFullView(BaseModel):
     title: str
     sections: List[Section]
     learning_objectives: Dict[str, str]
-    
+
 
 class SummaryRequest(BaseModel):
     level: Literal["tldr", "short", "bullets", "simple"]
 
 class SummaryResponse(BaseModel):
     summary: str
+
+class TransformRequest(BaseModel):
+    mode: Literal["simplify", "elaborate", "distill"]
+
+class TransformResponse(BaseModel):
+    transformedText: str
