@@ -1,5 +1,5 @@
-import uuid
 from app.utils.prompt_templates import build_summary_prompt, build_transform_prompt
+from app.utils.pdf_pipeline import prune_tree
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from uuid import uuid4
@@ -9,13 +9,13 @@ import os
 import openai
 from dotenv import load_dotenv
 import json
-from app.utils.text_extraction import build_section_extraction_prompt, extract_section_text, SectionExtractionError, extract_text_from_pdf
-# from app.utils.text_extraction import build_section_extraction_prompt, extract_section_text, SectionExtractionError
+from app.utils.text_extraction import build_section_extraction_prompt, extract_section_text, SectionExtractionError
 from app.utils.question_pipeline import generate_question_set
 from app.models.document_models import *
 from app.models.question_models import *
 from app.models.quiz_models import *
 from app.storage.memory import *
+from app.utils.pdf_pipeline import preprocess_pdf
 
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -145,26 +145,42 @@ def add_section_ids(
 
 @app.post("/documents/upload-file", response_model=DocumentResponse)
 async def upload_document_file(file: UploadFile = File(...), title: str = Form(...)):
-    # Check file type
-    if file.content_type == "application/pdf":
-        raw_text = extract_text_from_pdf(file.file)
-    elif file.content_type == "text/plain":
-        raw_bytes = await file.read()
-        raw_text = raw_bytes.decode("utf-8")
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported file type")
+    print(f"[upload] Received file: filename={file.filename!r}, content_type={file.content_type!r}")
+    try:
+        # Read the entire upload into memory once
+        data = await file.read()
+        print(f"[upload]   file size: {len(data)} bytes")
 
-    doc_id = str(uuid4())
-    DOCUMENTS[doc_id] = {
-        "title": title,
-        "raw_text": raw_text,
-        "upload_time": datetime.now().isoformat(),
-        "status": "processing",
-        "sections": None,
-        "learning_objectives": None,
-    }
+        if file.content_type == "application/pdf":
+            # Pass raw bytes to PyMuPDF
+            # Run Steps 1–4 and get both cleaned text + visuals
+            raw_text = preprocess_pdf(data)
+            visuals = {}
+        elif file.content_type == "text/plain":
+            raw_text = data.decode("utf-8")
+            visuals  = {}
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file type")
+        
+        print("[upload]   extracted text length:", len(raw_text))
 
-    return {"document_id": doc_id, "status": "processing"}
+        doc_id = str(uuid4())
+        DOCUMENTS[doc_id] = {
+            "title": title,
+            "raw_text": raw_text,
+            "visuals": visuals,
+            "upload_time": datetime.now().isoformat(),
+            "status": "processing",
+            "sections": None,
+            "learning_objectives": None,
+        }
+
+        return {"document_id": doc_id, "status": "processing"}
+
+    except Exception as e:
+        # print full traceback
+        import traceback; traceback.print_exc()
+        raise
 
 
 @app.post("/documents/{doc_id}/sections/detect", response_model=SectionDetectionResponse)
@@ -174,8 +190,11 @@ async def detect_sections(doc_id: str):
 
     raw_text = DOCUMENTS[doc_id]["raw_text"]
 
-    # GPT prompt
+    print(">>> detect_sections got raw_text of type", type(raw_text))
+    print(raw_text)
+
     prompt = build_section_extraction_prompt(raw_text)
+    # prompt = build_section_extraction_prompt(raw_text)
 
     try:
         response = client.chat.completions.create(
@@ -183,18 +202,21 @@ async def detect_sections(doc_id: str):
             messages=[
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
+            temperature=0,
             response_format={"type": "json_object"}
         )
         gpt_output = response.choices[0].message.content
 
         # Try to safely parse JSON
         data = json.loads(gpt_output)
+        print(data)
         sections = data["sections"]
+        sections = prune_tree(sections)
 
         # Add section text to each section
         try:
             sections_with_text = extract_section_text(raw_text, sections)
+            # sections_with_text = extract_section_text(raw_text, sections)
             for section in sections_with_text:
                 section["questions"] = []
         except SectionExtractionError as e:
@@ -530,47 +552,7 @@ async def summarize_section(doc_id: str, section_id: str, req: SummaryRequest):
         print(traceback.format_exc(), flush=True)
         raise
 
-# Simple in-memory cache. Keyed by (doc_id, section_id).
-# simplify_cache: Dict[Tuple[str, str], str] = {}
-
-# @app.post(
-#     "/documents/{doc_id}/sections/{section_id}/simplify",
-#     response_model=SimplifyResponse,
-# )
-# async def simplify_section(doc_id: str, section_id: str):
-#     # 1. Return cached if available
-#     cache_key = (doc_id, section_id)
-#     if cache_key in simplify_cache:
-#         return SimplifyResponse(simplifiedText=simplify_cache[cache_key])
-
-#     # 2. Lookup the section (reusing your existing logic)
-#     try:
-#         section = get_section(doc_id, section_id)
-#     except HTTPException as e:
-#         # Propagate 404 if section not found
-#         raise e
-
-#     text = section.get("text")
-#     if not text:
-#         raise HTTPException(status_code=500, detail="Section has no text to simplify")
-
-#     # 3. Build prompt & call GPT
-#     prompt = build_simplify_prompt(text)
-#     response = client.chat.completions.create(
-#             model="gpt-4.1-nano",
-#             messages=[
-#                 {"role": "system", "content": "You are a helpful academic assistant."},
-#                 {"role": "user", "content": prompt}
-#             ],
-#             temperature=0.5,
-#         )
-#     simplified = response.choices[0].message.content
-
-#     # 4. Cache and return
-#     simplify_cache[cache_key] = simplified
-#     return SimplifyResponse(simplifiedText=simplified)
-
-
+# Simple in-memory cache. Keyed by (doc_id, section_id, mode).
 transform_cache: Dict[Tuple[str, str, str], str] = {}
 
 @app.post(

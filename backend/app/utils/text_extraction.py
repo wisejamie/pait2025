@@ -1,9 +1,5 @@
 import re
 from rapidfuzz import fuzz
-import io
-import PyPDF2
-from app.utils.text_cleaning import clean_text
-import fitz
 
 class SectionExtractionError(Exception):
     """Raised when section text could not be extracted reliably."""
@@ -75,31 +71,55 @@ Here is the article:
 \"\"\"
 """
 
-
 def find_fuzzy_sentence(article_words, first_sentence,
                         chunk_size=5,
                         chunk_match_threshold=80,
-                        full_sentence_threshold=70):
+                        full_sentence_threshold=90):
     """
     Return the start index of the best match for `first_sentence` in `article_words`,
     or None if no acceptable match is found.
     """
+    print(f"\n🔍 Matching sentence: {first_sentence}")
     first_words = first_sentence.split()[:chunk_size]
     best = None  # tuple (full_score, index)
+
     for i in range(len(article_words) - chunk_size + 1):
         chunk = article_words[i : i + chunk_size]
-        score = fuzz.ratio(" ".join(chunk), " ".join(first_words))
-        if score >= chunk_match_threshold:
-            # try full-sentence match window
+        chunk_score = fuzz.ratio(" ".join(chunk), " ".join(first_words))
+        if chunk_score >= chunk_match_threshold:
             window = article_words[i : i + len(first_sentence.split())]
             full_score = fuzz.ratio(" ".join(window), first_sentence)
+            print(f"  ✅ Chunk match @ {i}: chunk='{chunk}' | full_score={full_score}")
+
             if full_score >= full_sentence_threshold:
+                print(f"  🎯 Found full match @ index {i}")
                 return i
+
             if best is None or full_score > best[0]:
                 best = (full_score, i)
-    # fallback if partial matches exist
-    if best and best[0] >= full_sentence_threshold * 0.8:
+
+        elif chunk_score >= chunk_match_threshold - 30:
+            print("lower thresh")
+            window = article_words[i : i + len(first_sentence.split())]
+            full_score = fuzz.ratio(" ".join(window), first_sentence)
+            print(f"  ✅ Chunk match @ {i}: chunk='{chunk}' | full_score={full_score}")
+
+            if full_score >= full_sentence_threshold:
+                print(f"  🎯 Found full match @ index {i}")
+                return i
+
+            if best is None or full_score > best[0]:
+                best = (full_score, i)
+
+
+    if best:
+        print(f"  ⚠️ Best partial match score: {best[0]} at index {best[1]}")
+
+    if best and best[0] >= full_sentence_threshold * 0.6:
+        print(f"  ⬅️ Accepting fallback partial match @ index {best[1]}")
         return best[1]
+
+    print("  ❌ No suitable match found.")
     return None
 
 
@@ -119,85 +139,99 @@ def flatten_sections(sections, depth=0):
 
 def extract_section_text(article_text: str, sections: list) -> list:
     """
-    Enrich the nested `sections` structure by populating each dict's `text` field.
-
-    1. Tokenize the article into `article_words`.
-    2. Flatten sections (recording depth).
-    3. Locate each section's start via fuzzy matching of its `first_sentence`.
-    4. For each section in the flat list, its end is the next item's start
-       at depth <= its own depth (or end of article).
-    5. Slice `article_words[start:end]`, rebuild text with spaces and newlines,
-       and assign back to each section.
-
-    Returns the original nested `sections` with `text` fields filled.
+    Enrich the nested `sections` structure by populating each dict's `text` field,
+    include any preceding text in the same paragraph, and
+    also include any Markdown headings immediately above that paragraph.
     """
-    # 1) tokenize
+    # 1. Tokenize
     article_words = re.findall(r'\S+|\n', article_text)
+    print(f"\n📝 Article tokenized into {len(article_words)} words")
 
-    # 2) flatten
+    # 2. Flatten
     flat_secs = flatten_sections(sections)
+    print(f"📚 Found {len(flat_secs)} sections (flattened)")
 
-    # 3) find start indices
+    # helper: back up to paragraph start
+    def find_para_start(idx):
+        p = idx
+        # while p >= 2 and not (article_words[p-1] == '\n' and article_words[p-2] == '\n'):
+        while p >= 2 and not (article_words[p-1] == '\n'):
+            p -= 1
+        return p
+
+    # helper: include any header lines (starting with '#') immediately above
+    def include_preceding_headers(p: int, article_words: list[str]) -> int:
+        """
+        Starting from token‐index p (the paragraph start), walk backward,
+        skipping blank lines, and include every Markdown header line
+        (lines starting with '#') until you hit non‐header content.
+        Returns the new start index.
+        """
+        curr = p
+        while True:
+            # 1) find the end of the previous line
+            prev_nl = next((i for i in range(curr - 1, -1, -1) if article_words[i] == '\n'), None)
+            if prev_nl is None:
+                break
+
+            # 2) find the start of that line
+            prev2 = next((i for i in range(prev_nl - 1, -1, -1) if article_words[i] == '\n'), -1)
+
+            # 3) reconstruct that line
+            line_tokens = article_words[prev2 + 1 : prev_nl]
+            line = ''.join(tok if tok == '\n' else tok + ' ' for tok in line_tokens).strip()
+
+            # 4) if it’s blank, skip it and continue looking higher
+            if not line:
+                curr = prev2 + 1
+                continue
+
+            # 5) if it’s a Markdown header, include it & keep going
+            if re.match(r'^\s*#+\s+', line):
+                curr = prev2 + 1
+                continue
+
+            # 6) otherwise, stop
+            break
+
+        return curr
+
+    # 3. Fuzzy match first sentences, then back up
     for sec in flat_secs:
+        print(f"\n--- Matching section: '{sec['title']}' ---")
         idx = find_fuzzy_sentence(article_words, sec['first_sentence'])
         if idx is None:
+            print(f"❌ Could not find match for: {sec['first_sentence']}")
             raise SectionExtractionError(sec['title'])
-        sec['_start_idx'] = idx
 
-    # 4) extract spans
+        # 3a) back up to start of paragraph
+        para_start = find_para_start(idx)
+        # 3b) then include any headers directly above
+        start_idx = include_preceding_headers(para_start, article_words)
+
+        sec['_start_idx'] = start_idx
+        print(f"✅ Section '{sec['title']}' start at token {start_idx}"
+              f" (para was {para_start}, match was {idx})")
+
+    # 4. Extract spans
     for i, sec in enumerate(flat_secs):
         start = sec['_start_idx']
         depth = sec['_depth']
-        # default to end of article
+        # default end at EOF
         end = len(article_words)
-        # look ahead for next boundary at <= depth
+        # find next same-or-higher section
         for nxt in flat_secs[i+1:]:
             if nxt['_depth'] <= depth:
                 end = nxt['_start_idx']
                 break
 
-        # 5) slice and assign, preserving spaces
+        # reassemble
         span_tokens = article_words[start:end]
-        text = ''
-        for tok in span_tokens:
-            if tok == '\n':
-                text += '\n'
-            else:
-                text += tok + ' '
-        sec['text'] = text.strip()
+        text = ''.join('\n' if tok=='\n' else tok+' ' for tok in span_tokens).strip()
+        sec['text'] = text
+        print(f"✂️ Extracted '{sec['title']}' → {len(text)} chars")
 
-        # cleanup intermediate keys
+        # cleanup
         del sec['_start_idx'], sec['_depth']
 
     return sections
-
-
-# def extract_text_from_pdf(file) -> str:
-#     """Extracts all text from a PDF file-like object."""
-#     with io.BytesIO(file.read()) as file_stream:
-#         reader = PyPDF2.PdfReader(file_stream)
-#         text = ''
-#         for page in reader.pages:
-#             page_text = page.extract_text()
-#             if page_text:
-#                 text += page_text + '\n'
-#     text = clean_text(text)
-#     return text
-def extract_text_from_pdf(file):
-    """
-    Extracts raw text from a PDF using PyMuPDF.
-    Attempts to preserve paragraph structure by pulling text block-wise from each page.
-    """
-    file_bytes = file.read()  # Read file contents into bytes
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    text_blocks = []
-
-    for page_num, page in enumerate(doc, start=1):
-        # Use layout-aware text extraction
-        page_text = page.get_text("text")
-        text_blocks.append(page_text.strip())
-
-    # Combine pages with double newlines to encourage paragraph breaks
-    full_text = "\n\n".join(text_blocks)
-    full_text = clean_text(full_text)
-    return full_text

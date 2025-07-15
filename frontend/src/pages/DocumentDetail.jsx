@@ -44,11 +44,8 @@ export default function DocumentDetail() {
         setObjectives(response.learning_objectives || {});
 
         console.log("Fetched sections response:", sectionRes.data);
-        // ➤ fetch existing questions for this document
         const qRes = await axios.get(`${API_BASE}/documents/${id}/questions`);
-
         setAllQuestionsCount(qRes.data.length);
-
         console.log("Fetched questions response:", qRes.data);
         setQuestions(Array.isArray(qRes.data) ? qRes.data : []);
 
@@ -71,31 +68,27 @@ export default function DocumentDetail() {
     load();
   }, [id]);
 
-  const renderSectionTree = (sections, depth = 0, parentKey = "") =>
-    sections.map((section, index) => {
+  // Render all sections as clickable links
+  const renderSectionTree = (sections, depth = 0) =>
+    sections.map((section) => {
       const sectionKey = section.id;
-      const linkToQuiz = section.sub_sections?.length === 0;
-
       return (
         <li
           key={sectionKey}
           className={`pl-${depth * 4} border-l-2 border-blue-400 ml-2`}
         >
-          {linkToQuiz ? (
-            <Link
-              to={`/documents/${id}/sections/${sectionKey}`}
-              className="text-blue-600 hover:underline"
-            >
-              {section.title}
-            </Link>
-          ) : (
-            <span className="font-semibold">{section.title}</span>
-          )}
+          <Link
+            to={`/documents/${id}/sections/${sectionKey}`}
+            className="text-blue-600 hover:underline font-semibold"
+          >
+            {section.title}
+          </Link>
 
-          <ul className="ml-4 mt-1">
-            {section.sub_sections?.length > 0 &&
-              renderSectionTree(section.sub_sections, depth + 1, sectionKey)}
-          </ul>
+          {section.sub_sections?.length > 0 && (
+            <ul className="ml-4 mt-1">
+              {renderSectionTree(section.sub_sections, depth + 1)}
+            </ul>
+          )}
         </li>
       );
     });
@@ -129,12 +122,10 @@ export default function DocumentDetail() {
             checked={allSelected}
             onChange={(e) => {
               if (e.target.checked) {
-                // add this section + all descendants
                 setSelectedSections((prev) =>
                   Array.from(new Set([...prev, ...ids]))
                 );
               } else {
-                // remove this section + all descendants
                 setSelectedSections((prev) =>
                   prev.filter((id) => !ids.includes(id))
                 );
@@ -194,7 +185,6 @@ export default function DocumentDetail() {
           Start Full Quiz
         </button>
       )}
-      {/* if customization is off, show the old Start button */}
       {questions !== null && questions.length > 0 && !isCustomizeOpen && (
         <button
           onClick={() => setCustomizeOpen(true)}
@@ -204,18 +194,15 @@ export default function DocumentDetail() {
         </button>
       )}
 
-      {/* Modal */}
       {isCustomizeOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center">
           <div className="bg-white p-6 rounded shadow-lg w-full max-w-md">
             <h2 className="text-xl font-semibold mb-4">Customize Quiz</h2>
 
-            {/* Section selector (recursive tree) */}
             <div className="mb-4 max-h-64 overflow-y-auto border p-2 rounded">
               {sections.map((sec) => renderCheckboxTree(sec))}
             </div>
 
-            {/* Question count */}
             <div className="mb-4">
               <label className="block mb-1">
                 Number of questions (1–{allQuestionsCount}):
@@ -230,7 +217,6 @@ export default function DocumentDetail() {
               />
             </div>
 
-            {/* Actions */}
             <div className="flex justify-end space-x-2">
               <button
                 onClick={() => setCustomizeOpen(false)}
@@ -245,7 +231,6 @@ export default function DocumentDetail() {
                   selectedSections.length === 0
                 }
                 onClick={async () => {
-                  // POST create session
                   const { data } = await axios.post(
                     `${API_BASE}/quiz-sessions/`,
                     {

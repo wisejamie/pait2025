@@ -141,15 +141,7 @@ export default function SectionQuizPreview() {
   const displayText =
     viewMode === "original" ? section.text : transformedTexts[viewMode];
 
-  // Normalize paragraph breaks for markdown rendering
-  // Only normalize for original mode to preserve tables in transformed modes
-  const markdownText =
-    viewMode === "original"
-      ? displayText
-          .split(/\n\s*\n+/)
-          .filter((para) => para.trim() !== "")
-          .join("\n\n")
-      : displayText;
+  const markdownText = displayText;
 
   return (
     <div className="p-6">
