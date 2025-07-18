@@ -51,3 +51,7 @@ class TransformRequest(BaseModel):
 
 class TransformResponse(BaseModel):
     transformedText: str
+
+class ExplainRequest(BaseModel):
+    section_text: str   # the full paragraph (or section) for context
+    snippet: str        # the user-highlighted text

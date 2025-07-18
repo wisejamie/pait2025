@@ -1,9 +1,15 @@
 import { BrowserRouter as Router, Routes, Route, Link } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import Documents from "./pages/Documents";
 import DocumentDetail from "./pages/DocumentDetail";
 import SectionQuizPreview from "./pages/SectionQuizPreview";
 import QuizView from "./pages/QuizView";
 import QuizSummary from "./pages/QuizSummary";
+
+function KeyedSectionQuizPreview() {
+  const { sectionId } = useParams();
+  return <SectionQuizPreview key={sectionId} />;
+}
 
 function App() {
   return (
@@ -22,7 +28,7 @@ function App() {
           <Route path="/documents/:id" element={<DocumentDetail />} />
           <Route
             path="/documents/:docId/sections/:sectionId"
-            element={<SectionQuizPreview />}
+            element={<KeyedSectionQuizPreview />}
           />
           <Route path="/quiz/:sessionId" element={<QuizView />} />
           <Route path="/quiz/:sessionId/summary" element={<QuizSummary />} />

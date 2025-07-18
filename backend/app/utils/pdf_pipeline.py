@@ -145,6 +145,7 @@ def preprocess_pdf(path_or_bytes: Union[str, bytes], chunk_size: int = 100) -> s
         ),
         None
     )
+    print(cutoff)
     if cutoff is not None:
         blocks = blocks[:cutoff]
 

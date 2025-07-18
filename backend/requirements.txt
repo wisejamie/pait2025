@@ -1,9 +1,11 @@
+docling==2.41.0
+docling-core==2.42.0
+docling-ibm-models==3.8.1
+docling-parse==4.1.0
 fastapi==0.115.13
 httpx==0.28.1
 openai==1.88.0
 pydantic==2.11.7
-PyMuPDF==1.26.3
-PyPDF2==3.0.1
 python-dotenv==1.1.0
 python-multipart==0.0.20
 rapidfuzz==3.13.0
