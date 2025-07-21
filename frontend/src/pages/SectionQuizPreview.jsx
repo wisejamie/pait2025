@@ -230,29 +230,81 @@ export default function SectionQuizPreview() {
       );
       const exp = res.data.explanation;
 
-      // create highlight span
+      // 1. Create highlight span
       const span = document.createElement("span");
-      span.className =
-        "relative bg-yellow-200 outline-dotted outline-yellow-400 group inline";
+      span.className = [
+        "relative",
+        "inline-block",
+        "bg-yellow-200",
+        "outline-dotted outline-yellow-400",
+        "group",
+      ].join(" ");
       span.setAttribute("tabIndex", "0");
 
-      // extract selected content
+      // 2. Move selected content inside the span
       const content = range.extractContents();
       span.appendChild(content);
 
-      // create tooltip container
+      // 3. Create popover container
       const tip = document.createElement("div");
-      tip.className =
-        "absolute z-10 -top-8 transform mb-1 p-4 bg-gray-800 text-white text-sm rounded shadow-lg hidden group-hover:block group-focus:block overflow-auto";
-      span.appendChild(tip);
+      tip.className = [
+        "absolute",
+        "mb-2",
+        "w-max",
+        "max-w-[90vw]",
+        "max-h-96",
+        "overflow-auto",
+        "p-3",
+        "bg-white",
+        "text-gray-800",
+        "border",
+        "border-gray-200",
+        "rounded-lg",
+        "shadow-lg shadow-gray-400/50 backdrop-blur-sm",
+        "ring-2 ring-indigo-400",
+        "z-50",
+        "hidden", // default hidden
+      ].join(" ");
+      tip.style.top = "auto";
+      tip.style.bottom = "100%";
+      tip.style.left = "0"; // initial, will adjust with JS
+      tip.style.right = "auto";
 
-      // render markdown inside tooltip
+      // 4. Mount explanation content using React
       const root = ReactDOM.createRoot(tip);
       root.render(
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{exp}</ReactMarkdown>
       );
 
-      // insert
+      // 5. Append popover to span
+      span.appendChild(tip);
+
+      // 6. Show + position popover on hover/focus
+      span.addEventListener("mouseenter", () => {
+        tip.classList.remove("hidden");
+        requestAnimationFrame(() => {
+          const tipRect = tip.getBoundingClientRect();
+          const spanRect = span.getBoundingClientRect();
+          const overflowRight = tipRect.right - window.innerWidth;
+          const overflowLeft = tipRect.left;
+
+          if (overflowRight > 0) {
+            tip.style.left = "auto";
+            tip.style.right = "0";
+          } else if (overflowLeft < 0) {
+            tip.style.left = "0";
+            tip.style.right = "auto";
+          } else {
+            tip.style.left = "0";
+            tip.style.right = "auto";
+          }
+        });
+      });
+      span.addEventListener("mouseleave", () => tip.classList.add("hidden"));
+      span.addEventListener("focus", () => tip.classList.remove("hidden"));
+      span.addEventListener("blur", () => tip.classList.add("hidden"));
+
+      // 7. Insert span into the document
       range.insertNode(span);
     } catch (err) {
       console.error("Explain failed:", err);

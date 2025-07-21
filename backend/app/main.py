@@ -635,7 +635,7 @@ async def explain_snippet(
     # 3) Call GPT with “with_paragraph” prompt
     prompt = f"""Here is the full section text for context (no need to explain all of it):\n\n
     ```{full_text}```\n\n
-    Now explain only **this part** in clear detail without any preamble or additional text:\n\n
+    Now explain only **this part** in clear detail and understandable language without any preamble or additional text:\n\n
     ```{snippet}```""".strip()
 
     resp = client.chat.completions.create(
