@@ -6,7 +6,8 @@ docling-parse==4.1.0
 fastapi==0.115.13
 httpx==0.28.1
 openai==1.88.0
-psycopg-binary==3.2.9
+psycopg2
+psycopg2-binary
 pydantic==2.11.7
 python-dotenv==1.1.0
 python-multipart==0.0.20
