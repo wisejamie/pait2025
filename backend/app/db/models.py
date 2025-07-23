@@ -74,6 +74,9 @@ class QuizSession(Base):
     start_time    = Column(DateTime, server_default=func.now())
     end_time      = Column(DateTime, nullable=True)
 
+    # ── NEW ── track which question the user is on
+    current_index = Column(Integer, nullable=False, default=0)
+
     # relationships
     questions     = relationship(
         "QuizSessionQuestion",

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Union
 
 class QuizSessionCreateRequest(BaseModel):
     document_id: str
@@ -7,7 +7,7 @@ class QuizSessionCreateRequest(BaseModel):
     sections: Optional[List[str]] = None 
 
 class AnswerSubmission(BaseModel):
-    question_id: str
+    question_id: Union[int, str]
     selected_index: int
 
 class SectionScore(BaseModel):

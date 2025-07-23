@@ -21,8 +21,6 @@ class Section(BaseModel):
 
     class Config:
         from_attributes = True
-        # allow recursive models
-        orm_mode = True
 
 # needed to allow Section to reference itself
 Section.update_forward_refs()
