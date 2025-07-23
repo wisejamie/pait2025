@@ -1,3 +1,4 @@
+alembic==1.16.4
 docling==2.41.0
 docling-core==2.42.0
 docling-ibm-models==3.8.1
@@ -5,8 +6,10 @@ docling-parse==4.1.0
 fastapi==0.115.13
 httpx==0.28.1
 openai==1.88.0
+psycopg-binary==3.2.9
 pydantic==2.11.7
 python-dotenv==1.1.0
 python-multipart==0.0.20
 rapidfuzz==3.13.0
+SQLAlchemy==2.0.41
 uvicorn==0.29.0
