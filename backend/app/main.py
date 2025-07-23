@@ -1,6 +1,6 @@
 from app.utils.prompt_templates import build_summary_prompt, build_transform_prompt
 from app.utils.pdf_pipeline import prune_tree
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Request, Depends
 from pydantic import BaseModel, Field
 from uuid import uuid4
 from typing import Optional, List, Dict, Tuple, Any
@@ -11,11 +11,15 @@ from dotenv import load_dotenv
 import json
 from app.utils.text_extraction import build_section_extraction_prompt, extract_section_text, SectionExtractionError
 from app.utils.question_pipeline import generate_question_set
-from app.models.document_models import *
-from app.models.question_models import *
-from app.models.quiz_models import *
+from app.schemas.document_models import *
+from app.schemas.question_models import *
+from app.schemas.quiz_models import *
 from app.storage.memory import *
 from app.utils.pdf_pipeline import preprocess_pdf
+
+from sqlalchemy.orm import Session
+from app.db.session import SessionLocal
+from app.db import models
 
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,90 +41,144 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 Section.update_forward_refs()
 
 # Routes
+
+# 1) Upload new document metadata
 @app.post("/documents/", response_model=DocumentResponse)
-async def upload_document(doc: DocumentInput):
-    # Simulate storing and start processing
+def upload_document(
+    doc: DocumentInput,
+    db: Session = Depends(get_db),
+):
     doc_id = str(uuid4())
-    DOCUMENTS[doc_id] = {
-        "title": doc.title,
-        "raw_text": doc.raw_text,
-        "upload_time": datetime.now().isoformat(),
-        "status": "processing",
-        "sections": [],
-        "learning_objectives": {},
-    }
-    
+    db_doc = models.Document(
+        id=doc_id,
+        title=doc.title,
+        raw_text=doc.raw_text,
+        status="processing",
+        # sections and objectives will be filled later
+    )
+    db.add(db_doc)
+    db.commit()
     return {"document_id": doc_id, "status": "processing"}
 
 
+# 2) List all documents (id, title, upload_time)
 @app.get("/documents", response_model=List[DocumentView])
-def list_documents():
+def list_documents(db: Session = Depends(get_db)):
+    docs = db.query(models.Document).order_by(models.Document.created_at.desc()).all()
     return [
         {
-            "document_id": doc_id,
-            "title": doc.get("title", "Untitled"),
-            "upload_time": doc.get("upload_time", datetime.now().isoformat())
+            "document_id": d.id,
+            "title": d.title,
+            "upload_time": d.created_at.isoformat(),
         }
-        for doc_id, doc in DOCUMENTS.items()
+        for d in docs
     ]
 
+# 3) Get full document (including raw_text, status)
 @app.get("/documents/{doc_id}", response_model=DocumentFullView)
-async def get_document(doc_id: str):
-    doc = DOCUMENTS.get(doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+def get_document(doc_id: str, db: Session = Depends(get_db)):
+    d = db.query(models.Document).filter_by(id=doc_id).first()
+    if not d:
+        raise HTTPException(404, "Document not found")
+    # fetch related sections & objectives
+    sections = []
+    for s in d.sections:
+        sec = {
+            "id": s.id,
+            "title": s.title,
+            "first_sentence": s.first_sentence,
+            "text": s.text,
+            "sub_sections": s.sub_sections,
+        }
+        print(f"[get_sections] including section id={sec['id']} title={sec['title']!r}")
 
+    objectives = { str(lo.index): lo.objective for lo in d.learning_objectives }
+
+    print(f"[get_document] sections IDs: {[sec['id'] for sec in sections]}")
     return {
-        "document_id": doc_id,
-        "title": doc.get("title", "Untitled"),
-        "raw_text": doc.get("raw_text", ""),
-        "status": doc.get("status", "ready"),
-        "sections": doc.get("sections", []),
-        "learning_objectives": doc.get("learning_objectives", {}),
-    }
-
-@app.get("/documents/{doc_id}/sections")
-def get_sections(doc_id: str):
-    doc = DOCUMENTS.get(doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    sections = doc.get("sections", [])
-    learning_objectives = doc.get("learning_objectives", {})
-
-    # # Ensure section IDs are assigned
-    sections = add_section_ids(sections, doc_id)
-
-    return {
+        "document_id": d.id,
+        "title": d.title,
+        "raw_text": d.raw_text,
+        "status": d.status,
         "sections": sections,
-        "learning_objectives": learning_objectives,
+        "learning_objectives": objectives,
     }
 
 
+# 4) Get just sections + objectives for a document
+@app.get("/documents/{doc_id}/sections", response_model=SectionDetectionResponse)
+def get_sections(doc_id: str, db: Session = Depends(get_db)):
+    # 1) load flat rows
+    rows = db.query(models.Section).filter_by(doc_id=doc_id).all()
+    if not rows:
+        raise HTTPException(404, "Document not found or no sections")
+
+    # 2) make a map id -> row
+    row_map: Dict[str, models.Section] = {r.id: r for r in rows}
+
+    # 3) build the nested tree *using the stored JSON* in each row
+    def build_node(r: models.Section) -> Dict:
+        # r.sub_sections is the original JSON list of dicts
+        subs = []
+        for sub in r.sub_sections or []:
+            sub_id = sub["id"]  # must match a row_map entry
+            child_row = row_map.get(sub_id)
+            if child_row:
+                subs.append(build_node(child_row))
+        return {
+            "id": r.id,
+            "title": r.title,
+            "first_sentence": r.first_sentence,
+            "text": r.text,
+            "sub_sections": subs,
+            "questions": [],  # or load questions separately
+        }
+
+    # 4) pick only top-level sections: those whose id *after* docId_secN has no additional "_"
+    roots: List[Dict] = []
+    prefix = f"{doc_id}_sec"
+    for r in rows:
+        suffix = r.id[len(prefix):]  # e.g. "" or "2" or "2_1"
+        # if there's no "_" in suffix, it's a root
+        if "_" not in suffix:
+            roots.append(build_node(r))
+
+    # 5) load objectives
+    objectives = { str(lo.index): lo.objective for lo in
+                   db.query(models.LearningObjective).filter_by(doc_id=doc_id) }
+
+    return {"sections": roots, "learning_objectives": objectives}
+
+
+# 5) Get one section by its ID
 @app.get("/documents/{doc_id}/sections/{section_id}")
-def get_section(doc_id: str, section_id: str):
-    doc = DOCUMENTS.get(doc_id)
-    sections = doc.get("sections", [])
-    flat_sections = flatten_sections(sections)
-    print(section_id)
-    for section in flat_sections:
-        print(section.get("id"))
-        print(section.get("id") == section_id)
-        if section.get("id") == section_id:
-                return section
-
-    # for doc in DOCUMENTS.values():
-    #     sections = doc.get("sections", [])
-    #     flat_sections = flatten_sections(sections)
-    #     for section in flat_sections:
-    #         print(section.get("id"))
-    #         if section.get("id") == section_id:
-    #             return section
-
-    raise HTTPException(status_code=404, detail="Section not found")
+def get_section(doc_id: str, section_id: str, db: Session = Depends(get_db)):
+    s = (
+        db.query(models.Section)
+        .filter_by(id=section_id, doc_id=doc_id)
+        .first()
+    )
+    if not s:
+        raise HTTPException(404, "Section not found")
+    return {
+        "id": s.id,
+        "title": s.title,
+        "first_sentence": s.first_sentence,
+        "text": s.text,
+        "sub_sections": s.sub_sections,
+        "questions": [],  # no inline questions here
+    }
 
 def flatten_sections(sections):
     """Flatten a nested list of sections and their sub_sections into a single flat list."""
@@ -154,146 +212,130 @@ def add_section_ids(
     return sections
 
 
+# 6) File upload (PDF or text) — same as before, then seed a Document
 @app.post("/documents/upload-file", response_model=DocumentResponse)
-async def upload_document_file(file: UploadFile = File(...), title: str = Form(...)):
-    print(f"[upload] Received file: filename={file.filename!r}, content_type={file.content_type!r}")
-    try:
-        # Read the entire upload into memory once
-        data = await file.read()
-        print(f"[upload]   file size: {len(data)} bytes")
+async def upload_document_file(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    data = await file.read()
+    if file.content_type == "application/pdf":
+        raw_text = preprocess_pdf(data)
+    elif file.content_type == "text/plain":
+        raw_text = data.decode("utf-8")
+    else:
+        raise HTTPException(400, "Unsupported file type")
 
-        if file.content_type == "application/pdf":
-            # Pass raw bytes to PyMuPDF
-            # Run Steps 1–4 and get both cleaned text + visuals
-            raw_text = preprocess_pdf(data)
-            visuals = {}
-        elif file.content_type == "text/plain":
-            raw_text = data.decode("utf-8")
-            visuals  = {}
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file type")
-        
-        print("[upload]   extracted text length:", len(raw_text))
+    doc_id = str(uuid4())
+    db_doc = models.Document(
+        id=doc_id,
+        title=title,
+        raw_text=raw_text,
+        status="processing",
+    )
+    db.add(db_doc)
+    db.commit()
 
-        doc_id = str(uuid4())
-        DOCUMENTS[doc_id] = {
-            "title": title,
-            "raw_text": raw_text,
-            "visuals": visuals,
-            "upload_time": datetime.now().isoformat(),
-            "status": "processing",
-            "sections": None,
-            "learning_objectives": None,
-        }
-
-        return {"document_id": doc_id, "status": "processing"}
-
-    except Exception as e:
-        # print full traceback
-        import traceback; traceback.print_exc()
-        raise
+    return {"document_id": doc_id, "status": "processing"}
 
 
-@app.post("/documents/{doc_id}/sections/detect", response_model=SectionDetectionResponse)
-async def detect_sections(doc_id: str):
-    if doc_id not in DOCUMENTS:
-        raise HTTPException(status_code=404, detail="Document not found")
+# 7) Detect sections via GPT and persist them
+@app.post(
+    "/documents/{doc_id}/sections/detect",
+    response_model=SectionDetectionResponse,
+)
+async def detect_sections(doc_id: str, db: Session = Depends(get_db)):
+    d = db.query(models.Document).filter_by(id=doc_id).first()
+    if not d:
+        raise HTTPException(404, "Document not found")
 
-    raw_text = DOCUMENTS[doc_id]["raw_text"]
-
-    print(">>> detect_sections got raw_text of type", type(raw_text))
-    print(raw_text)
-
+    raw_text = d.raw_text
     prompt = build_section_extraction_prompt(raw_text)
-    # prompt = build_section_extraction_prompt(raw_text)
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-nano",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0,
-            response_format={"type": "json_object"}
+    # call GPT...
+    response = client.chat.completions.create(
+        model="gpt-4.1-nano",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        response_format={"type": "json_object"},
+    )
+    data = response.choices[0].message.content
+    parsed = json.loads(data)
+    sections = prune_tree(parsed["sections"])
+    sections = extract_section_text(raw_text, sections)
+    # delete any old sections
+    db.query(models.Section).filter_by(doc_id=doc_id).delete()
+    # insert new ones
+    for sec in sections:
+        db_sec = models.Section(
+            id=f"{doc_id}_{sec['id']}",
+            doc_id=doc_id,
+            title=sec["title"],
+            first_sentence=sec["first_sentence"],
+            text=sec["text"],
+            sub_sections=sec.get("sub_sections", []),
         )
-        gpt_output = response.choices[0].message.content
+        db.add(db_sec)
+    # learning objectives
+    db.query(models.LearningObjective).filter_by(doc_id=doc_id).delete()
+    for idx, obj in parsed["learning_objectives"].items():
+        db_lo = models.LearningObjective(
+            doc_id=doc_id, index=int(idx), objective=obj
+        )
+        db.add(db_lo)
 
-        # Try to safely parse JSON
-        data = json.loads(gpt_output)
-        print(data)
-        sections = data["sections"]
-        sections = prune_tree(sections)
+    d.status = "ready"
+    db.commit()
 
-        # Add section text to each section
-        try:
-            sections_with_text = extract_section_text(raw_text, sections)
-            # sections_with_text = extract_section_text(raw_text, sections)
-            for section in sections_with_text:
-                section["questions"] = []
-        except SectionExtractionError as e:
-            raise HTTPException(status_code=422, detail=str(e))
-
-        # Save enriched sections
-        DOCUMENTS[doc_id]["sections"] = sections_with_text
-        DOCUMENTS[doc_id]["learning_objectives"] = data["learning_objectives"]
-        DOCUMENTS[doc_id]["status"] = "ready"
-
-        return {
-            "sections": sections_with_text,
-            "learning_objectives": data["learning_objectives"]
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing GPT response: {e}")
+    return {"sections": sections, "learning_objectives": parsed["learning_objectives"]}
 
 
-@app.get("/documents/{doc_id}", response_model=DocumentFullView)
-async def get_document(doc_id: str):
-    if doc_id not in DOCUMENTS:
-        raise HTTPException(status_code=404, detail="Document not found")
+# 8) Get all questions for a document
+@app.get(
+    "/documents/{doc_id}/questions",
+    response_model=List[Question],
+)
+def get_document_questions(doc_id: str, db: Session = Depends(get_db)):
+    d = db.query(models.Document).filter_by(id=doc_id).first()
+    if not d:
+        raise HTTPException(404, "Document not found")
 
-    doc = DOCUMENTS[doc_id]
+    qs = db.query(models.Question).filter_by(doc_id=doc_id).all()
+    out = []
+    for q in qs:
+        opts = [o.text for o in sorted(q.options, key=lambda o: o.idx)]
+        out.append(
+            {
+                "question_text": q.question_text,
+                "options": opts,
+                "correct_index": q.correct_index,
+                "explanation": q.explanation,
+                "difficulty_score": q.difficulty_score,
+                "concept_tags": q.concept_tags,
+                "salience": q.salience,
+                "directness": q.directness,
+            }
+        )
+    return out
 
-    return {
-        "document_id": doc_id,
-        "title": doc.get("title"),
-        "raw_text": doc["raw_text"],
-        "status": doc.get("status", "processing"),
-        "sections": doc.get("sections"),
-        "learning_objectives": doc.get("learning_objectives"),
-    }
-
-@app.get("/documents/{doc_id}/questions", response_model=List[Question])
-async def get_document_questions(doc_id: str):
-    doc = DOCUMENTS.get(doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    sections = doc.get("sections", [])
-    all_questions = []
-
-    def collect_questions(section_list):
-        for section in section_list:
-            section_id = section.get("id")
-            if section_id and f"{section_id}" in QUESTIONS:
-                all_questions.extend(QUESTIONS[f"{section_id}"])
-            if "sub_sections" in section:
-                collect_questions(section["sub_sections"])
-
-    collect_questions(sections)
-    return all_questions
-
+# 9) Generate questions for all sections & persist them
 @app.post("/documents/{doc_id}/questions/generate-all")
-async def generate_questions_for_all_sections(doc_id: str):
-    doc = DOCUMENTS.get(doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
+def generate_questions_for_all_sections(doc_id: str, db: Session = Depends(get_db)):
+    d = db.query(models.Document).filter_by(id=doc_id).first()
+    if not d:
+        raise HTTPException(404, "Document not found")
 
-    top_sections = doc.get("sections", [])
-    global_learning_objectives = doc.get("learning_objectives", {})
+    # clear existing questions
+    db.query(models.QuestionOption).filter(
+        models.QuestionOption.question_id.in_(
+            db.query(models.Question.id).filter_by(doc_id=doc_id)
+        )
+    ).delete(synchronize_session=False)
+    db.query(models.Question).filter_by(doc_id=doc_id).delete()
 
     # Recursively collect only leaf sections (no sub_sections)
-    def get_leaf_sections(sections: List[Dict], parent_index="") -> List[Tuple[str, Dict]]:
+    def get_leaf_sections(sections: List[Dict], doc_id, parent_index="") -> List[Tuple[str, Dict]]:
         leaf_sections = []
         for i, sec in enumerate(sections):
             section_id = f"{doc_id}_sec{parent_index}{i}"
@@ -304,153 +346,175 @@ async def generate_questions_for_all_sections(doc_id: str):
                 leaf_sections.append((section_id, sec))
         return leaf_sections
 
-    leaf_sections = get_leaf_sections(top_sections)
-    results: Dict[str, Any] = {}
-
+    leaf_sections = get_leaf_sections(d.sections, doc_id)
+    results = {}
     for section_id, section in leaf_sections:
-        try:
-            section_text = section.get("text", "").strip()
-            if not section_text:
-                results[section_id] = {"error": "No section text found"}
-                continue
-
-            local_learning_objectives = section.get("learning_objectives", [])
-            questions = generate_question_set(
-                section_text=section_text,
-                num_questions=2,
-                local_learning_objectives=local_learning_objectives,
-                learning_objectives=global_learning_objectives
+        questions = generate_question_set(
+            section_text=section.text,
+            num_questions=2,
+            local_learning_objectives=[],  # adapt if needed
+            learning_objectives={},        # adapt
+        )
+        # persist
+        for q in questions:
+            db_q = models.Question(
+                doc_id=doc_id,
+                section_id=section_id,
+                question_text=q["question_text"],
+                correct_index=q["correct_index"],
+                explanation=q["explanation"],
+                difficulty_score=q["difficulty_score"],
+                concept_tags=q["concept_tags"],
+                salience=q["salience"],
+                directness=q["directness"],
             )
+            db.add(db_q)
+            db.flush()
+            for idx, opt in enumerate(q["options"]):
+                db_opt = models.QuestionOption(
+                    question_id=db_q.id, idx=idx, text=opt
+                )
+                db.add(db_opt)
+        results[section_id] = questions
 
-            QUESTIONS[f"{section_id}"] = questions
-            results[section_id] = questions
-
-        except Exception as e:
-            results[section_id] = {"error": str(e)}
-
+    db.commit()
     return results
 
 import random
 @app.post("/quiz-sessions/")
-async def create_quiz_session(req: QuizSessionCreateRequest):
-    doc_id = req.document_id
-    num_questions = req.num_questions
-    sections = req.sections
+def create_quiz_session(
+    req: QuizSessionCreateRequest,
+    db: Session = Depends(get_db),
+):
+    # 1) Validate document exists
+    doc = db.query(models.Document).get(req.document_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
 
-    print(doc_id)
-    # print(DOCUMENTS)
-    if doc_id not in DOCUMENTS:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    all_question_ids = []
-    if sections:
-        for sec in sections:
-            key = f"{sec}"
-            qs = QUESTIONS.get(key, [])
-            for idx, q in enumerate(qs):
-                question_id = f"{key}_q{idx}"
-                all_question_ids.append((question_id, sec, q))
-    
+    # 2) Collect question IDs
+    if req.sections:
+        # only questions in requested sections
+        q_query = (
+            db.query(models.Question.id)
+            .filter(
+                models.Question.doc_id == req.document_id,
+                models.Question.section_id.in_(req.sections),
+            )
+        )
     else:
-        for section_id, questions in QUESTIONS.items():
-            if section_id.startswith(doc_id):
-                for idx, q in enumerate(questions):
-                    question_id = f"{section_id}_q{idx}"
-                    all_question_ids.append((question_id, section_id, q))
-    
-    if not all_question_ids:
-        raise HTTPException(
-            status_code=400,
-            detail="No questions available for the selected sections."
+        # all questions for doc
+        q_query = db.query(models.Question.id).filter(
+            models.Question.doc_id == req.document_id
         )
 
-    # validate num_questions
-    if num_questions < 1:
-        raise HTTPException(400, "num_questions out of range.")
+    all_qids = [row.id for row in q_query]
+    if not all_qids:
+        raise HTTPException(400, "No questions available")
 
-    # ── Randomly sample the desired number
-    selected = random.sample(all_question_ids, min(num_questions, len(all_question_ids)))
+    # 3) Sample
+    selected = random.sample(all_qids, min(req.num_questions, len(all_qids)))
 
-    # ── Extract IDs and question bodies for session storage
-    selected_ids = [qid for qid, _, _ in selected]
-    session_questions = { qid: qdict for qid, _, qdict in selected }
-
-    # Store the session
+    # 4) Create session
     session_id = str(uuid4())
-    QUIZ_SESSIONS[session_id] = {
-        "document_id": doc_id,
-        "question_refs": selected,  # (question_id, section_id, question_obj)
-        "question_ids": selected_ids,
-        "responses": [],
-        "current_index": 0,
-        "start_time": datetime.now().isoformat(),
-        "end_time": None
-    }
+    session = models.QuizSession(id=session_id, doc_id=req.document_id)
+    db.add(session)
+    db.flush()  # so session.id is usable
+
+    # 5) Persist session questions in order
+    for idx, qid in enumerate(selected):
+        sq = models.QuizSessionQuestion(
+            session_id=session.id,
+            question_id=qid,
+            ordinal=idx
+        )
+        db.add(sq)
+
+    db.commit()
 
     return {
         "session_id": session_id,
-        "total_questions": len(selected_ids),
-        "status": "active"
+        "total_questions": len(selected),
+        "status": "active",
     }
 
 @app.get("/quiz-sessions/{session_id}/next")
-async def get_next_question(session_id: str):
-    if session_id not in QUIZ_SESSIONS:
-        raise HTTPException(status_code=404, detail="Quiz session not found")
+def get_next_question(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    session = db.query(models.QuizSession).get(session_id)
+    if not session:
+        raise HTTPException(404, "Quiz session not found")
 
-    session = QUIZ_SESSIONS[session_id]
-    index = session["current_index"]
-    total = len(session["question_refs"])
+    # find the next unanswered question
+    next_sq = (
+        db.query(models.QuizSessionQuestion)
+        .filter_by(session_id=session_id, answered=False)
+        .order_by(models.QuizSessionQuestion.ordinal)
+        .first()
+    )
 
-    if index >= total:
-        return {"message": "Quiz completed", "finished": True}
+    if not next_sq:
+        return {"finished": True, "message": "Quiz completed"}
 
-    question_id, section_id, question_obj = session["question_refs"][index]
-
-    # Return question data (hide answer metadata)
+    q = next_sq.question
     return {
-        "question_id": question_id,
-        "index": index,
-        "total": total,
+        "question_id": next_sq.id,
+        "index": next_sq.ordinal,
+        "total": len(session.questions),
         "question": {
-            "question_text": question_obj["question_text"],
-            "options": question_obj["options"]
-        }
+            "question_text": q.question_text,
+            "options": [o.text for o in sorted(q.options, key=lambda o: o.idx)],
+        },
     }
 
 @app.post("/quiz-sessions/{session_id}/answer")
-async def submit_answer(session_id: str, submission: AnswerSubmission):
-    if session_id not in QUIZ_SESSIONS:
-        raise HTTPException(status_code=404, detail="Quiz session not found")
+def submit_answer(
+    session_id: str,
+    submission: AnswerSubmission,
+    db: Session = Depends(get_db),
+):
+    session = db.query(models.QuizSession).get(session_id)
+    if not session:
+        raise HTTPException(404, "Quiz session not found")
 
-    session = QUIZ_SESSIONS[session_id]
-    index = session["current_index"]
-    total = len(session["question_refs"])
+    # lookup the session_question by its id
+    sq = db.query(models.QuizSessionQuestion).get(submission.session_question_id)
+    if not sq or sq.session_id != session_id:
+        raise HTTPException(400, "Invalid question reference")
 
-    if index >= total:
-        raise HTTPException(status_code=400, detail="Quiz already completed")
+    if sq.answered:
+        raise HTTPException(400, "Question already answered")
 
-    current_qid, section_id, question_obj = session["question_refs"][index]
+    # grade
+    correct = submission.selected_index == sq.question.correct_index
+    # save response
+    resp = models.QuizResponse(
+        session_question_id=sq.id,
+        selected_index=submission.selected_index,
+        correct=correct,
+    )
+    db.add(resp)
+    # mark as answered
+    sq.answered = True
 
-    if submission.question_id != current_qid:
-        raise HTTPException(status_code=400, detail="Submitted question does not match current question")
+    # if this was the last question, record end_time
+    unanswered = (
+        db.query(models.QuizSessionQuestion)
+        .filter_by(session_id=session_id, answered=False)
+        .count()
+    )
+    if unanswered == 0:
+        session.end_time = datetime.utcnow()
 
-    is_correct = submission.selected_index == question_obj["correct_index"]
-
-    session["responses"].append({
-        "question_id": current_qid,
-        "selected_index": submission.selected_index,
-        "correct": is_correct
-    })
-
-    session["current_index"] += 1
+    db.commit()
 
     return {
-        "correct": is_correct,
-        "correct_index": question_obj["correct_index"],
-        "explanation": question_obj.get("explanation", ""),
-        "next_index": session["current_index"],
-        "completed": session["current_index"] >= total
+        "correct": correct,
+        "correct_index": sq.question.correct_index,
+        "explanation": sq.question.explanation or "",
+        "next_index": sq.ordinal + 1,
+        "completed": unanswered == 0,
     }
 
 # ── helper to find a section’s title by its ID
@@ -470,67 +534,90 @@ def lookup_section_title(doc_id: str, section_id: str) -> str:
     return recurse(sections) or section_id
 
 @app.get("/quiz-sessions/{session_id}/summary")
-async def get_quiz_summary(session_id: str):
-    if session_id not in QUIZ_SESSIONS:
-        raise HTTPException(status_code=404, detail="Quiz session not found")
+def get_quiz_summary(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    # 1) Load session with its questions & responses
+    session = (
+        db.query(models.QuizSession)
+          .filter_by(id=session_id)
+          .first()
+    )
+    if not session:
+        raise HTTPException(404, "Quiz session not found")
 
-    session = QUIZ_SESSIONS[session_id]
-    total = len(session["question_refs"])
-    responses = session["responses"]
+    # eagerly load session.questions and their response & question
+    sqs: List[models.QuizSessionQuestion] = (
+        db.query(models.QuizSessionQuestion)
+          .filter_by(session_id=session_id)
+          .order_by(models.QuizSessionQuestion.ordinal)
+          .all()
+    )
 
-    if len(responses) < total:
-        return {"message": "Quiz not yet complete", "finished": False}
+    total = len(sqs)
+    # check completion
+    if any(not sq.answered for sq in sqs):
+        return {"finished": False, "message": "Quiz not yet complete"}
 
-    num_correct = sum(1 for r in responses if r["correct"])
+    # 2) Compute overall correct/incorrect
+    num_correct = sum(1 for sq in sqs if sq.response and sq.response.correct)
     num_incorrect = total - num_correct
     score_pct = round((num_correct / total) * 100, 2)
 
-     # ── compute per‐section stats
-    section_stats: Dict[str, Dict[str,int]] = {}
-    for idx, response in enumerate(responses):
-        _, section_id, _ = session["question_refs"][idx]
-        stats = section_stats.setdefault(section_id, {"total": 0, "correct": 0})
+    # 3) Section-level stats
+    section_map = {}
+    for sq in sqs:
+        sec_id = sq.question.section_id
+        stats = section_map.setdefault(sec_id, {"total": 0, "correct": 0})
         stats["total"] += 1
-        if response["correct"]:
+        if sq.response and sq.response.correct:
             stats["correct"] += 1
 
-    section_scores = []
-    for section_id, stats in section_stats.items():
-        total_sec = stats["total"]
+    section_scores: List[SectionScore] = []
+    for sec_id, stats in section_map.items():
+        # fetch section title
+        sec = db.query(models.Section).filter_by(id=sec_id).first()
+        title = sec.title if sec else ""
         correct_sec = stats["correct"]
-        section_scores.append({
-            "section_id": section_id,
-            "section_title": lookup_section_title(session["document_id"], section_id),
-            "correct": correct_sec,
-            "incorrect": total_sec - correct_sec,
-            "total": total_sec,
-            "percent": round((correct_sec / total_sec) * 100, 2)
-        })
+        total_sec = stats["total"]
+        section_scores.append(
+            SectionScore(
+                section_id=sec_id,
+                section_title=title,
+                correct=correct_sec,
+                incorrect=total_sec - correct_sec,
+                total=total_sec,
+                percent=round((correct_sec / total_sec) * 100, 2),
+            )
+        )
 
-    missed_questions = []
-    for i, response in enumerate(responses):
-        if not response["correct"]:
-            qid, section_id, qobj = session["question_refs"][i]
-            missed_questions.append({
-                "question_id": qid,
-                "question_text": qobj["question_text"],
-                "options": qobj["options"],
-                "selected_index": response["selected_index"],
-                "correct_index": qobj["correct_index"],
-                "explanation": qobj.get("explanation", "")
-            })
+    # 4) Missed questions details
+    missed: List[MissedQuestion] = []
+    for sq in sqs:
+        if sq.response and not sq.response.correct:
+            q = sq.question
+            missed.append(
+                MissedQuestion(
+                    question_id=str(sq.id),
+                    question_text=q.question_text,
+                    options=[opt.text for opt in sorted(q.options, key=lambda o: o.idx)],
+                    selected_index=sq.response.selected_index,
+                    correct_index=q.correct_index,
+                    explanation=q.explanation or "",
+                )
+            )
 
-    return {
-        "total_questions": total,
-        "correct": num_correct,
-        "incorrect": num_incorrect,
-        "score_percent": score_pct,
-        "section_scores": section_scores,
-        "missed_questions": missed_questions,
-        "finished": True,
-        "document_id": session["document_id"] 
-    }
-
+    return QuizSummaryOut(
+        document_id=session.doc_id,
+        total_questions=total,
+        correct=num_correct,
+        incorrect=num_incorrect,
+        score_percent=score_pct,
+        section_scores=section_scores,
+        missed_questions=missed,
+        finished=True,
+    )
 
 import traceback
 @app.post(
@@ -912,6 +999,7 @@ Although our article is presented in a kind of competition between humans and AI
         "status":"ready",
         'sections': [
             {'title': 'Text Understanding in GPT-4 vs Humans', 
+            'id':'test-shultz_sec0',
             'first_sentence': 'We examine whether a leading AI system GPT-4 understands text as well as humans do,', 
             "text": """## Text Understanding in GPT-4 vs Humans
 
@@ -920,6 +1008,7 @@ We examine whether a leading AI system GPT-4 understands text as well as humans 
 Key words: General AI; Generative AI; Large language model; GPT-4; inference; generalization.""",
             'learning_objectives': ['Summarize the main research question comparing GPT-4 and human text understanding', "Identify the key findings regarding GPT-4's performance relative to humans on discourse comprehension", 'Explain the significance of generalization and inference as signatures of understanding in GPT-4'], 'sub_sections': []}, 
             {'title': '1. Introduction', 
+            'id':'test-shultz_sec1',
             'first_sentence': 'Recent advances in artificial intelligence (AI) have generated vigorous debates about whether these computational systems', 
             "text": """## 1. Introduction
 
@@ -938,6 +1027,7 @@ In this work, we focus on the critically important issue of whether LLMs underst
 In psychology, text comprehension consists of building multi-level representations of the information in a passage of text (9). The comprehension improves when the reader has enough background knowledge to assimilate  the text and as the reader constructs more  representation levels and more inferences at each level. Successful comprehension can be measured by any of several abilities: correctly answering relevant questions, drawing relevant and correct inferences, asking  good  questions,  generating  good  summaries  of  the  text,  and  detecting  anomalies  and contradictions. Generalization is considered as a kind of inference that has fairly wide application. Knowledge-based inferences are constructed when background knowledge in long-term memory is activated and then encoded in the meaning representation of the text. We examine as many of these abilities as the data allow to assess text comprehension in humans and GPT-4.""",
             'learning_objectives': ['Describe the debate surrounding AI approaching Artificial General Intelligence (AGI) and human performance', 'Explain the concept of Large Language Models (LLMs) and their training process', "Summarize previous findings on LLMs' capabilities in challenging cognitive tasks", 'Identify limitations and challenges faced by LLMs in complex reasoning and understanding'], 'sub_sections': []}, 
             {'title': '2. Understanding Relatively Simple Passages', 
+            'id':'test-shultz_sec2',
             'first_sentence': 'GPT-4 generates novel sentence content, has been pre-trained on vast amounts of unlabeled text, and uses a transformer architecture', 
             "text": """
 ## 2. Understanding Relatively Simple Passages
@@ -1038,7 +1128,7 @@ Classical psychology experiments on discourse comprehension typically gave parti
 A close analog to asking a human participant to write out a remembered paragraph is to ask GPT-4 to summarize what it has just read. This results in a very concise summary with little or no hint  of  inferencing.  However,  as  noted  in  the  2.2  Results  section,  when  we  request  GPT-4  to mention inferences to accompany their concise story summary, we discover that it provides many inferences that go well beyond the modest inferencing apparent in our first experiment with yes/no questions.  It  might  be  interesting  to  see  whether  human  participants  would  likewise  provide additional inferences if similarly prompted in this task.""",
             'learning_objectives': ["Describe the methodology used to assess GPT-4's understanding of simple passages using the Discourse Comprehension Test", 'Explain how the test measures comprehension through questions about stated and implied information', 'Summarize the experimental design, including scoring methods and comparison to human performance', "Interpret the results showing GPT-4's performance relative to humans and chance", "Discuss the significance of GPT-4's ability to provide concise explanations and inferences"], 'sub_sections': 
             [
-                {'title': '2.1 Methods', 'first_sentence': 'GPT-4 generates novel sentence content, has been pre-trained on vast amounts of unlabeled text, and uses a transformer architecture that leverages attention mechanisms to focus on relevant parts of sentences that may have difficult long-range dependencies.', 
+                {'title': '2.1 Methods', 'id':'test-shultz_sec2_0', 'first_sentence': 'GPT-4 generates novel sentence content, has been pre-trained on vast amounts of unlabeled text, and uses a transformer architecture that leverages attention mechanisms to focus on relevant parts of sentences that may have difficult long-range dependencies.', 
                 "text": """## 2. Understanding Relatively Simple Passages
 
 ## 2.1 Methods
@@ -1062,7 +1152,7 @@ In a follow-up experiment run through Copilot GPT-4 on 2 April 2024, we instead 
 In  our  first  experiment,  we  test  GPT-4's  ability  to  understand  brief  stories  with  yes/no questions structured to manipulate the salience and directness of parts of a story. Each of the 88 answers (8 answers per 11 stories) is categorized as correct , wrong , or unsure .  An answer is correct if it matches the designated correct answer ( yes or no ) (10). Unlike the human participants, who apparently  always  conformed  to  answering  only yes or no in  their  experiment  (12),  GPT-4 occasionally hedges by providing a neutral answer. Here is an  exhaustive list of  these neutral answers in our experiment: The story does not specify …, not specified , not mentioned ,  or The story  does  not  provide  information  on  this .  For  these  hedged  cases,  we  score  the  answer's correctness as .5 because it is approximately midway between correct (coded 1) and wrong (coded 0). None of these answers merits a score of 0, because each of the six incorrect answers are hedged; they are uncertain rather than being correct or wrong. For completeness, we also alternatively score hedged responses as 0, rather than .5.
 """,
                 'learning_objectives': ["Describe GPT-4's architecture and training data relevant to understanding passages", 'Explain the features of the Discourse Comprehension Test used for evaluating GPT-4', 'Summarize how questions are structured to assess comprehension of main ideas and details', "Describe the scoring system for GPT-4's responses, including handling hedged answers"], 'sub_sections': []}, 
-                {'title': '2.2 Results', 'first_sentence': 'Because there are considerably more data points in the human sample (5 stories x 8 questions x 40 participants = 1600), we compare a single GPT-4 performance to human performance in terms of proportion of correct answers.', 
+                {'title': '2.2 Results', 'id':'test-shultz_sec2_1','first_sentence': 'Because there are considerably more data points in the human sample (5 stories x 8 questions x 40 participants = 1600), we compare a single GPT-4 performance to human performance in terms of proportion of correct answers.', 
                 "text": """## 2.2 Results
 
 Because there are considerably more data points in the human sample (5 stories x 8 questions x 40 participants = 1600), we compare a single GPT-4 performance to human performance in terms of proportion of correct answers. Proportions correct in the human control sample are computed from Table 2 in the human study (12). Our Table 1 presents summary results for humans vs. GPT-4 with each of the two scoring methods for hedged responses. Although GPT-4 does very slightly better than  humans  for  each  of  the  two  scoring  methods,  both  differences  are  far  below  statistical significance.  For  the  statistical  tests  in  this  section,  we  use  the  Two  Sample  Independent Proportions Test Calculator at Purdue University, a binomial test available online requiring input of sample size and successes for each of the two types of participants (humans and GPT-4).
@@ -1120,7 +1210,7 @@ It is telling that GPT-4 never makes a wrong response in this experiment. As not
 
 We also experiment with GPT-4's ability  to  summarize  these  stories,  finding  that  they produce a concise and accurate paragraph without much in the way of inferences. However, if we ask for a summary that mentions inferences, this opens the inferential floodgates. With that prompt, GPT-4  produces  a  total  of  54  new  inferences  that  go  well  beyond  those  used  in  the  yes/no questions. The mean number of such inferences per story is 4.91, with a standard deviation of 2.02, and a range of 2 to 8. An example is provided in Appendix C, using the story presented in Appendix A.""",
                 'learning_objectives': ["Compare GPT-4's performance to human performance on the discourse comprehension questions", "Interpret statistical significance and what it indicates about GPT-4's understanding", "Describe how GPT-4's performance varies across different question types and experimental conditions", "Explain the importance of GPT-4's ability to hedge and justify answers"], 'sub_sections': []}, 
-                {'title': '2.3 Discussion', 'first_sentence': 'Our results show GPT-4 matches and even slightly exceeds the high level of human performance on the Discourse Comprehension Test.', 
+                {'title': '2.3 Discussion', 'id':'test-shultz_sec2_2','first_sentence': 'Our results show GPT-4 matches and even slightly exceeds the high level of human performance on the Discourse Comprehension Test.', 
                 "text": """## 2.3 Discussion
 
 Our  results  show  that  GPT-4  matches  and  even  slightly  exceeds  the  high  level  of  human performance on the Discourse Comprehension Test (10). Due to excellent human performance, there is very little room for GPT-4 to exhibit superiority over humans.
@@ -1141,7 +1231,7 @@ A close analog to asking a human participant to write out a remembered paragraph
                 'learning_objectives': ["Summarize the main conclusions about GPT-4's comprehension of simple passages", 'Explain why both GPT-4 and humans perform poorly on implied details questions', "Discuss the significance of GPT-4's ability to provide explanations and justifications", 'Identify the signatures of understanding such as inference and generalization observed in GPT-4'], 'sub_sections': []}
             ]
             }, 
-            {'title': '3. Understanding More Difficult Passages', 'first_sentence': 'The lack of statistically significant differences between humans and GPT-4 in section 2 could be due to the relative simplicity of the stories used in the Discourse Comprehension Test.', 
+            {'title': '3. Understanding More Difficult Passages', 'id':'test-shultz_sec3','first_sentence': 'The lack of statistically significant differences between humans and GPT-4 in section 2 could be due to the relative simplicity of the stories used in the Discourse Comprehension Test.', 
             "text": """## 3. Understanding More Difficult Passages
 
 The lack of statistically significant differences between humans and GPT-4 in section 2 could be due to the relative simplicity of the stories used in the Discourse Comprehension Test (10). Both classes of participants performed at a sufficiently high level that there was very little room for one type to statistically exceed the performance of the other type. Our preliminary conclusion is that GPT-4 at least matched human performance on discourse comprehension. Here in section 3, we use  considerably  more  difficult  reading  material,  to  allow  greater  possible  distance  between humans and GPT-4 in one direction or the other.
@@ -1244,7 +1334,7 @@ It is likely that some of the extra words used by the test makers are useful in 
 """,
             'learning_objectives': ['Explain why increasing passage difficulty can reveal performance differences between GPT-4 and humans', "Summarize GPT-4's performance on standardized academic tests like SAT, GRE, and LSAT", "Describe how GPT-4's percentile scores demonstrate its superior reading comprehension on difficult texts", 'Discuss the signatures of understanding such as generalization and inference in more complex passages'], 'sub_sections': 
             [
-                {'title': '3.1 Overall Test Results', 'first_sentence': "Large teams of OpenAI researchers recently published an extensive and detailed Technical Report on GPT-4's capabilities, limitations, and safety characteristics.", 
+                {'title': '3.1 Overall Test Results', 'id':'test-shultz_sec3_0','first_sentence': "Large teams of OpenAI researchers recently published an extensive and detailed Technical Report on GPT-4's capabilities, limitations, and safety characteristics.", 
                 "text": """## 3.1 Overall Test Results
 
 Large teams of OpenAI researchers recently published an extensive and detailed Technical Report  on  the  capabilities,  limitations,  and  safety  characteristics  of  GPT-4  (17).  Among  the capabilities that they addressed were performances on 34 academic tests covering a wide range of fields. Three of these academic tests had sections that addressed reading comprehension at higher levels of difficulty than the Discourse Comprehension Test used in our section 2: SAT, GRE, and LSAT.
@@ -1271,7 +1361,7 @@ Reading  Comprehension  questions  on  the  GRE  are  designed  to  test  for  t
 
 Reading comprehension passages and questions on the LSAT seem particularly well suited to discovering indications of true understanding as they often require the reader to reason beyond the literal text. Their multiple-choice questions probe for main ideas, explicitly stated information, inferable information, generalization to different contexts, and analogizing.""",
                 'learning_objectives': ["Summarize GPT-4's performance on standardized academic tests and what percentile scores indicate", 'Describe the methodology used to verify the absence of training data contamination', "Explain how GPT-4's high scores reflect its reading comprehension abilities on difficult passages", 'Identify the types of questions (e.g., inference, reasoning) that GPT-4 can handle effectively'], 'sub_sections': []}, 
-                {'title': '3.2 Other Signatures of Understanding', 'first_sentence': 'Although there are no precise experimental distinctions in these academic tests between stated and inferred information and between main points and details, as in The Discourse Comprehension Test, it is still possible to identify important signatures of text understanding such as generalization and inference.', 
+                {'title': '3.2 Other Signatures of Understanding', 'id':'test-shultz_sec3_1','first_sentence': 'Although there are no precise experimental distinctions in these academic tests between stated and inferred information and between main points and details, as in The Discourse Comprehension Test, it is still possible to identify important signatures of text understanding such as generalization and inference.', 
                 "text": """
 ## 3.2 Other Signatures of Understanding
 
@@ -1346,7 +1436,7 @@ It is likely that some of the extra words used by the test makers are useful in 
                 'learning_objectives': ["Describe how GPT-4's explanations and justifications demonstrate understanding", 'Explain the significance of generalization and inference as signatures of comprehension', 'Summarize the experiment where GPT-4 provides justifications for LSAT questions and its outcomes', "Discuss how GPT-4's ability to produce concise explanations supports its understanding"], 'sub_sections': []}
             ]
             }, 
-            {'title': '4. General Discussion', 'first_sentence': 'We report in section 2 that GPT-4 matches the performance of average adult humans on the Discourse Comprehension Test.', 
+            {'title': '4. General Discussion', 'id':'test-shultz_sec4','first_sentence': 'We report in section 2 that GPT-4 matches the performance of average adult humans on the Discourse Comprehension Test.', 
             "text": """## 4. General Discussion
 
 We report  in  section  2  that  GPT-4  matches  the  performance  of  average  adult  humans  on  the Discourse Comprehension Test (10). This is notable on its own, but there is more to say about this phenomenon. Because the stories in that test are rather simple (5 th  and 6 th grade reading levels), both humans and GPT-4 perform at a very high level. This raises the possibility that there is not sufficient room for one type of participant to perform at a higher level than the other type. We find in section 3.1 that increasing the difficulty of the text enables greater separation of the two subject types. GPT-4 here performs at a much higher level than do the humans for whom the more difficult tests were designed, i.e., highly motivated students striving to extend their education by doing well on admission tests. Performance differences on these more difficult passages and test questions are in  the  general  neighborhood  of  2:1  in  favour  of  GPT-4  on  the  percentile  scale.  This  provides substantial evidence that increasing the difficulty of text passages creates a strong interaction with participant type. Average humans do about as well with understanding simple text as does GPT-4, but GPT-4 can greatly exceed the performance of intelligent humans on more difficult passages.

@@ -11,15 +11,21 @@ class DocumentResponse(BaseModel):
     document_id: str
     status: str  # 'processing', 'ready', or 'error'
 
-
 class Section(BaseModel):
+    id: str                          # ← add this
     title: str
     first_sentence: str
     text: Optional[str] = None
-    sub_sections: Optional[List[Dict]] = []
+    sub_sections: List["Section"] = []   # recursive nesting
+    questions: List[Dict] = []      # if you include questions in this response
 
     class Config:
         from_attributes = True
+        # allow recursive models
+        orm_mode = True
+
+# needed to allow Section to reference itself
+Section.update_forward_refs()
 
 
 class SectionDetectionResponse(BaseModel):

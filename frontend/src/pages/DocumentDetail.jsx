@@ -37,9 +37,13 @@ export default function DocumentDetail() {
         const sectionRes = await axios.get(
           `${API_BASE}/documents/${id}/sections`
         );
+
+        console.log("🛰 sectionRes.data:", sectionRes.data);
         const response = Array.isArray(sectionRes.data)
           ? sectionRes.data[0]
           : sectionRes.data;
+
+        console.log("🛰 parsed sections object:", response);
         setSections(response.sections || []);
         setObjectives(response.learning_objectives || {});
 
@@ -71,6 +75,7 @@ export default function DocumentDetail() {
   // Render all sections as clickable links
   const renderSectionTree = (sections, depth = 0) =>
     sections.map((section) => {
+      console.log(`🔗 Rendering section (depth=${depth}):`, section);
       const sectionKey = section.id;
       return (
         <li
