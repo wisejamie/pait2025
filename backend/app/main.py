@@ -214,8 +214,8 @@ def add_section_ids(
 ) -> List[Dict]:
     for i, section in enumerate(sections):
         # Build section ID based on its position
-        section_id = f"{doc_id}_sec{parent_index}{i}"
-        section['id'] = section_id
+        local_id = f"sec{parent_index}{i}"
+        section['id'] = local_id
 
         # Recurse into any nested subsections
         sub_secs = section.get('sub_sections')
@@ -279,6 +279,9 @@ async def detect_sections(doc_id: str, db: Session = Depends(get_db)):
     parsed = json.loads(data)
     sections = prune_tree(parsed["sections"])
     sections = extract_section_text(raw_text, sections)
+
+    sections = add_section_ids(sections, doc_id)
+
     # delete any old sections
     db.query(models.Section).filter_by(doc_id=doc_id).delete()
     # insert new ones
