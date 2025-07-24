@@ -179,21 +179,12 @@ def get_sections(doc_id: str, db: Session = Depends(get_db)):
 # 5) Get one section by its ID
 @app.get("/documents/{doc_id}/sections/{section_id}")
 def get_section(doc_id: str, section_id: str, db: Session = Depends(get_db)):
-    s = (
-        db.query(models.Section)
-        .filter_by(id=section_id, doc_id=doc_id)
-        .first()
-    )
-    if not s:
+    sec = db.query(models.Section)\
+            .filter_by(doc_id=doc_id, id=section_id)\
+            .first()
+    if not sec:
         raise HTTPException(404, "Section not found")
-    return {
-        "id": s.id,
-        "title": s.title,
-        "first_sentence": s.first_sentence,
-        "text": s.text,
-        "sub_sections": s.sub_sections,
-        "questions": [],  # no inline questions here
-    }
+    return sec
 
 def flatten_sections(sections):
     """Flatten a nested list of sections and their sub_sections into a single flat list."""
@@ -645,13 +636,13 @@ import traceback
     "/documents/{doc_id}/sections/{section_id}/summarize",
     response_model=SummaryResponse,
 )
-async def summarize_section(doc_id: str, section_id: str, req: SummaryRequest):
+async def summarize_section(doc_id: str, section_id: str, req: SummaryRequest, db: Session = Depends(get_db)):
     try:
-        section = get_section(doc_id, section_id)
+        section = get_section(doc_id, section_id, db)
         if not section:
             raise HTTPException(status_code=404, detail="Section not found")
 
-        section_text = section.get("text")
+        section_text = section.text
         if not section_text:
             raise HTTPException(status_code=500, detail="Section has no text")
 
@@ -682,6 +673,7 @@ async def transform_section(
     doc_id: str,
     section_id: str,
     req: TransformRequest,
+    db: Session = Depends(get_db)
 ):
     # 1) return cached result if available
     cache_key = (doc_id, section_id, req.mode)
@@ -690,11 +682,11 @@ async def transform_section(
 
     # 2) fetch section via existing logic
     try:
-        section = get_section(doc_id, section_id)
+        section = get_section(doc_id, section_id, db)
     except HTTPException as e:
         raise e
 
-    text = section.get("text")
+    text = section.text
     if not text:
         raise HTTPException(status_code=500, detail="Section has no text to transform")
 
