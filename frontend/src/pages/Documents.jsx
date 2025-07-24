@@ -4,6 +4,7 @@ import {
   createDocument,
   uploadDocumentFile,
   detectSections,
+  deleteDocument,
 } from "../services/api";
 import { Link } from "react-router-dom";
 
@@ -15,6 +16,7 @@ export default function Documents() {
   const [uploadText, setUploadText] = useState("");
   const [uploadFile, setUploadFile] = useState(null);
   const [isUploading, setUploading] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
 
   const openModal = () => setModalOpen(true);
   const closeModal = () => {
@@ -55,6 +57,22 @@ export default function Documents() {
     }
   };
 
+  const handleDelete = async (docId) => {
+    if (!window.confirm("Are you sure you want to delete this document?")) {
+      return;
+    }
+    setDeletingId(docId);
+    try {
+      await deleteDocument(docId);
+      await loadDocuments();
+    } catch (err) {
+      console.error("Delete failed:", err);
+      alert("Failed to delete document");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   useEffect(() => {
     loadDocuments();
   }, []);
@@ -75,16 +93,28 @@ export default function Documents() {
             Upload New Document
           </button>
           {documents.map((doc) => (
-            <li key={doc.document_id} className="p-4 bg-white shadow rounded">
-              <Link
-                to={`/documents/${doc.document_id}`}
-                className="text-blue-600 hover:underline"
+            <li
+              key={doc.document_id}
+              className="p-4 bg-white shadow rounded flex items-center justify-between"
+            >
+              <div>
+                <Link
+                  to={`/documents/${doc.document_id}`}
+                  className="text-blue-600 hover:underline"
+                >
+                  {doc.title || "Untitled Document"}
+                </Link>
+                <p className="text-sm text-gray-500">
+                  Uploaded on: {new Date(doc.upload_time).toLocaleString()}
+                </p>
+              </div>
+              <button
+                onClick={() => handleDelete(doc.document_id)}
+                disabled={deletingId === doc.document_id}
+                className="bg-red-500 hover:bg-red-600 text-white font-semibold py-1 px-3 rounded ml-4 disabled:opacity-50"
               >
-                {doc.title || "Untitled Document"}
-              </Link>
-              <p className="text-sm text-gray-500">
-                Uploaded on: {new Date(doc.upload_time).toLocaleString()}
-              </p>
+                {deletingId === doc.document_id ? "Deleting…" : "Delete"}
+              </button>
             </li>
           ))}
         </ul>

@@ -40,6 +40,10 @@ export const detectSections = async (docId) => {
   await axios.post(`${API_BASE}/documents/${docId}/sections/detect`);
 };
 
+export const deleteDocument = async (docId) => {
+  await axios.delete(`${API_BASE}/documents/${docId}`);
+};
+
 export const fetchQuestions = async (docId) => {
   const { data } = await axios.get(`${API_BASE}/documents/${docId}/questions`);
   return data;

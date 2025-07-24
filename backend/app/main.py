@@ -1,6 +1,6 @@
 from app.utils.prompt_templates import build_summary_prompt, build_transform_prompt
 from app.utils.pdf_pipeline import prune_tree
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Request, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Request, Depends, Response
 from pydantic import BaseModel, Field
 from uuid import uuid4
 from typing import Optional, List, Dict, Tuple, Any
@@ -342,18 +342,6 @@ def generate_questions_for_all_sections(doc_id: str, db: Session = Depends(get_d
         )
     ).delete(synchronize_session=False)
     db.query(models.Question).filter_by(doc_id=doc_id).delete()
-
-    # Recursively collect only leaf sections (no sub_sections)
-    # def get_leaf_sections(sections: List[Dict], doc_id, parent_index="") -> List[Tuple[str, Dict]]:
-    #     leaf_sections = []
-    #     for i, sec in enumerate(sections):
-    #         section_id = f"{doc_id}_sec{parent_index}{i}"
-    #         sub_secs = sec.get("sub_sections", [])
-    #         if sub_secs:
-    #             leaf_sections.extend(get_leaf_sections(sub_secs, parent_index=f"{parent_index}{i}_"))
-    #         else:
-    #             leaf_sections.append((section_id, sec))
-    #     return leaf_sections
 
     def get_leaf_sections_orm(all_secs: List[Section]) -> List[Tuple[str, Section]]:
         """
@@ -750,6 +738,21 @@ async def explain_snippet(
     explanation = resp.choices[0].message.content.strip()
 
     return {"explanation": explanation}
+
+
+@app.delete("/documents/{doc_id}", status_code=204)
+def delete_document(
+    doc_id: str,
+    db: Session = Depends(get_db),
+):
+    print(f"[delete] attempting to delete document {doc_id}")
+    doc = db.query(models.Document).get(doc_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    db.delete(doc)
+    db.commit()
+    print(f"[delete] document {doc_id} and all its sections/objectives removed")
+    return Response(status_code=204)
 
 # # FOR TESTING PURPOSES:
 # @app.on_event("startup")
