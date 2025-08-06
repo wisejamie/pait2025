@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-export default function SectionQuizPreview() {
+export default function SectionDetail() {
   const { docId, sectionId } = useParams();
   const navigate = useNavigate();
 
@@ -15,9 +15,6 @@ export default function SectionQuizPreview() {
   const [section, setSection] = useState(null);
   const [allSections, setAllSections] = useState([]);
   const [loading, setLoading] = useState(true);
-
-  // Quiz generation state
-  const [generating, setGenerating] = useState(false);
 
   // Summarization state
   const [summaryLevel, setSummaryLevel] = useState("tldr");
@@ -160,19 +157,6 @@ export default function SectionQuizPreview() {
   if (!section) return <div className="p-6">Section not found.</div>;
 
   // API actions
-  const generateQuestions = async () => {
-    setGenerating(true);
-    try {
-      await axios.post(`${API_BASE}/sections/${sectionId}/questions/generate`);
-      navigate(`/quiz/session-mock-${sectionId}`);
-    } catch (err) {
-      console.error("Failed to generate questions:", err);
-      alert("Failed to generate questions. Try again.");
-    } finally {
-      setGenerating(false);
-    }
-  };
-
   const fetchSummary = async () => {
     setLoadingSummary(true);
     setSummaryError("");
@@ -365,10 +349,9 @@ export default function SectionQuizPreview() {
           onChange={(e) => setSummaryLevel(e.target.value)}
           className="p-1 border rounded"
         >
-          <option value="tldr">TL;DR</option>
+          <option value="tldr">1-Sentence</option>
           <option value="short">Short</option>
           <option value="bullets">Bullets</option>
-          <option value="simple">Simple</option>
         </select>
         <button
           onClick={fetchSummary}
@@ -415,15 +398,6 @@ export default function SectionQuizPreview() {
           </div>
         )}
       </div>
-
-      {/* Quiz button */}
-      <button
-        onClick={generateQuestions}
-        disabled={generating}
-        className="mt-4 bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
-      >
-        {generating ? "Generating..." : "Start Quiz"}
-      </button>
 
       {/* Nav links */}
       <div className="mt-8 flex justify-between">
