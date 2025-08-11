@@ -18,7 +18,7 @@ function App() {
         <nav className="bg-gray-800 text-white p-4 mb-6">
           <div className="container mx-auto">
             <Link to="/" className="font-semibold text-lg hover:underline">
-              🧠 AI Tutor
+              🧠 PAIT
             </Link>
           </div>
         </nav>
