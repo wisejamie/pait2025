@@ -5,6 +5,7 @@ import DocumentDetail from "./pages/DocumentDetail";
 import SectionDetail from "./pages/SectionDetail";
 import QuizView from "./pages/QuizView";
 import QuizSummary from "./pages/QuizSummary";
+import AskTutor from "./pages/AskTutor";
 
 function KeyedSectionDetail() {
   const { sectionId } = useParams();
@@ -32,6 +33,7 @@ function App() {
           />
           <Route path="/quiz/:sessionId" element={<QuizView />} />
           <Route path="/quiz/:sessionId/summary" element={<QuizSummary />} />
+          <Route path="/documents/:id/ask" element={<AskTutor />} />
         </Routes>
       </div>
     </Router>

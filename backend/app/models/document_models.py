@@ -55,3 +55,18 @@ class TransformResponse(BaseModel):
 class ExplainRequest(BaseModel):
     section_text: str   # the full paragraph (or section) for context
     snippet: str        # the user-highlighted text
+
+class AskRequest(BaseModel):
+    question: str
+    context: Literal["document", "section"]
+    section_id: Optional[str] = None
+    history: Optional[List[Dict]] = None
+    max_tokens: Optional[int] = 800
+    include_sources: Optional[bool] = False
+
+class AskResponse(BaseModel):
+    answer: str
+    used_context: Literal["document", "section", "auto"]
+    sources: Optional[List[Dict]] = None
+    token_usage: Optional[Dict] = None
+    warnings: Optional[List[str]] = None

@@ -51,6 +51,37 @@ export default function SectionDetail() {
       "Distilled: only the core ideas and arguments, with supporting details removed for conciseness.",
   };
 
+  const [askOpen, setAskOpen] = useState(false);
+  const [askLoading, setAskLoading] = useState(false);
+  const [askQ, setAskQ] = useState("");
+  const [askThread, setAskThread] = useState([]);
+
+  async function askTutorInSection() {
+    if (!askQ.trim()) return;
+    setAskLoading(true);
+    try {
+      setAskThread((t) => [...t, { role: "user", text: askQ }]);
+      setAskQ("");
+      const { data } = await axios.post(`${API_BASE}/documents/${docId}/ask`, {
+        question: askQ,
+        context: "section",
+        section_id: sectionId,
+      });
+      setAskThread((t) => [
+        ...t,
+        { role: "assistant", text: data?.answer || "No answer returned." },
+      ]);
+    } catch (e) {
+      console.error(e);
+      setAskThread((t) => [
+        ...t,
+        { role: "assistant", text: "_Sorry—failed to fetch an answer._" },
+      ]);
+    } finally {
+      setAskLoading(false);
+    }
+  }
+
   // Load section & TOC
   useEffect(() => {
     async function loadSection() {
@@ -398,6 +429,77 @@ export default function SectionDetail() {
           </div>
         )}
       </div>
+
+      <button
+        onClick={() => setAskOpen(true)}
+        title="Ask the Tutor"
+        className="fixed bottom-5 right-5 z-50 rounded-full shadow-lg px-4 py-3 bg-purple-600 hover:bg-purple-700 text-white"
+      >
+        💬 Ask
+      </button>
+
+      {/* Ask modal */}
+      {askOpen && (
+        <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50">
+          <div className="bg-white w-full sm:max-w-2xl sm:rounded-lg sm:shadow-lg p-4">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-lg font-semibold">
+                Ask the Tutor — {section.title}
+              </h3>
+              <button
+                onClick={() => setAskOpen(false)}
+                className="text-gray-600 hover:text-gray-800"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="mb-3">
+              <textarea
+                value={askQ}
+                onChange={(e) => setAskQ(e.target.value)}
+                placeholder="Ask a question about this section…"
+                rows={3}
+                className="w-full border rounded p-3"
+              />
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={askTutorInSection}
+                disabled={askLoading}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded disabled:opacity-50"
+              >
+                {askLoading ? "Thinking…" : "Ask"}
+              </button>
+            </div>
+
+            {/* Thread */}
+            {askThread.length > 0 && (
+              <div className="mt-4 max-h-80 overflow-auto space-y-3">
+                {askThread.map((msg, i) => (
+                  <div
+                    key={i}
+                    className={
+                      msg.role === "user"
+                        ? "bg-blue-50 border border-blue-200 p-3 rounded"
+                        : "bg-gray-50 border border-gray-200 p-3 rounded"
+                    }
+                  >
+                    <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">
+                      {msg.role === "user" ? "You" : "Tutor"}
+                    </div>
+                    <div className="prose max-w-none text-gray-900">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {msg.text}
+                      </ReactMarkdown>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Nav links */}
       <div className="mt-8 flex justify-between">

@@ -159,6 +159,12 @@ export default function DocumentDetail() {
 
       <h2 className="text-lg font-semibold mb-2">Sections</h2>
       <ul className="space-y-2">{renderSectionTree(sections)}</ul>
+      <button
+        onClick={() => navigate(`/documents/${id}/ask`)}
+        className="mt-6 ml-0 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded"
+      >
+        Ask the Tutor
+      </button>
       {questions !== null && questions.length === 0 ? (
         <button
           onClick={async () => {

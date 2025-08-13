@@ -71,3 +71,15 @@ export async function getQuizSummary(sessionId) {
   );
   return response.data;
 }
+
+export async function askTutor(
+  documentId,
+  { question, context = "document", section_id = null }
+) {
+  const { data } = await axios.post(`${API_BASE}/documents/${documentId}/ask`, {
+    question,
+    context,
+    section_id,
+  });
+  return data; // { answer: string }
+}

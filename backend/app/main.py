@@ -647,6 +647,122 @@ async def explain_snippet(
 
     return {"explanation": explanation}
 
+
+def _get_document_text(doc: Dict[str, Any]) -> str:
+    """
+    Prefer raw_text if present; otherwise stitch from section titles + text.
+    """
+    raw = (doc.get("raw_text") or "").strip()
+    if raw:
+        return raw
+
+    parts: List[str] = []
+    def walk(secs: List[Dict]):
+        for s in secs or []:
+            title = s.get("title") or ""
+            txt = s.get("text") or ""
+            if title:
+                parts.append(f"# {title}\n\n")
+            if txt:
+                parts.append(txt + "\n\n")
+            if s.get("sub_sections"):
+                walk(s["sub_sections"])
+    walk(doc.get("sections", []))
+    return "".join(parts).strip()
+
+def _get_section_text(doc: Dict[str, Any], section_id: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Return (text, section_dict) for a given section_id or raise 404.
+    """
+    flat = flatten_sections(doc.get("sections", []))
+    for s in flat:
+        if s.get("id") == section_id:
+            return (s.get("text") or "").strip(), s
+    raise HTTPException(status_code=404, detail="Section not found")
+
+def _build_ask_messages(context_blob: str, question: str, section_title: Optional[str] = None) -> List[Dict[str, str]]:
+    where = f', specifically the section: "{section_title}"' if section_title else ""
+    system_msg = (
+        "You are a careful tutor for the provided document. "
+        "Use ONLY the supplied context text to answer. "
+        "If the answer is not in the context, say: 'I don’t see that in the document.' "
+        "Prefer clear, concise explanations. Use markdown when helpful."
+    )
+    user_msg = (
+        f"Context below is from the document{where}.\n"
+        f"——— START CONTEXT ———\n{context_blob}\n——— END CONTEXT ———\n\n"
+        f"Question: {question}"
+    )
+    return [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_msg},
+    ]
+
+@app.post("/documents/{doc_id}/ask", response_model=AskResponse)
+async def ask_tutor(doc_id: str, payload: AskRequest):
+    """
+    POST /documents/{doc_id}/ask
+    Body: {question, context: "document"|"section", section_id?}
+    Returns: AskResponse(answer, used_context, sources?, token_usage?, warnings?)
+    """
+    # 1) Validate document (and section if needed)
+    doc = DOCUMENTS.get(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if payload.context not in ("document", "section"):
+        raise HTTPException(status_code=400, detail="context must be 'document' or 'section'")
+
+    used_context = payload.context
+    warnings: List[str] = []
+    sources: Optional[List[Dict[str, str]]] = None
+
+    # 2) Assemble grounded context
+    if used_context == "section":
+        if not payload.section_id:
+            raise HTTPException(status_code=400, detail="section_id is required when context='section'")
+        section_text, sec = _get_section_text(doc, payload.section_id)
+        if not section_text:
+            raise HTTPException(status_code=422, detail="No text found for that section.")
+        messages = _build_ask_messages(section_text, payload.question, section_title=sec.get("title"))
+        sources = [{"section_id": sec.get("id"), "title": sec.get("title")}]
+    else:
+        doc_text = _get_document_text(doc)
+        if not doc_text:
+            raise HTTPException(status_code=422, detail="Document has no extracted text.")
+        messages = _build_ask_messages(doc_text, payload.question)
+        # sources can be added in the future if you select specific sections
+
+    # 3) Call the model (same client pattern as /explain)
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4.1-nano",
+            messages=messages,
+            temperature=0,
+            max_tokens=payload.max_tokens or 800,
+        )
+        answer = resp.choices[0].message.content.strip()
+        usage = getattr(resp, "usage", None)
+        token_usage = None
+        if usage:
+            token_usage = {
+                "prompt": getattr(usage, "prompt_tokens", None),
+                "completion": getattr(usage, "completion_tokens", None),
+                "total": getattr(usage, "total_tokens", None),
+            }
+    except Exception as e:
+        print("[/documents/{doc_id}/ask] model error:", e)
+        raise HTTPException(status_code=502, detail="Upstream model error")
+
+    # 4) Return structured response
+    return AskResponse(
+        answer=answer,
+        used_context=used_context,
+        sources=sources if (payload.include_sources or used_context == "section") else None,
+        token_usage=token_usage,
+        warnings=warnings or None,
+    )
+
 # FOR TESTING PURPOSES:
 @app.on_event("startup")
 async def load_test_data():
