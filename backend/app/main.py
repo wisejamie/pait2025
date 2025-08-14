@@ -40,6 +40,14 @@ app.add_middleware(
 Section.update_forward_refs()
 
 # Routes
+@app.get("/")
+def root():
+    return {"ok": True, "service": "PAIT API"}
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "healthy"}
+
 @app.post("/documents/", response_model=DocumentResponse)
 async def upload_document(doc: DocumentInput):
     # Simulate storing and start processing
