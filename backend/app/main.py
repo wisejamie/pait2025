@@ -1,6 +1,6 @@
 from app.utils.prompt_templates import build_summary_prompt, build_transform_prompt
 from app.utils.pdf_pipeline import prune_tree
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body, Request, Response
 from pydantic import BaseModel, Field
 from uuid import uuid4
 from typing import Optional, List, Dict, Tuple, Any
@@ -40,6 +40,22 @@ app.add_middleware(
 Section.update_forward_refs()
 
 # Routes
+@app.get("/", include_in_schema=False)
+def root_get():
+    return {"ok": True, "service": "ai-tutor-quiz", "docs": "/docs"}
+
+@app.head("/", include_in_schema=False)
+def root_head():
+    return Response(status_code=200)
+
+@app.get("/healthz", include_in_schema=False)
+def health_get():
+    return {"ok": True}
+
+@app.head("/healthz", include_in_schema=False)
+def health_head():
+    return Response(status_code=200)
+
 @app.post("/documents/", response_model=DocumentResponse)
 async def upload_document(doc: DocumentInput):
     # Simulate storing and start processing
