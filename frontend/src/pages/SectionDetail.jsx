@@ -55,18 +55,33 @@ export default function SectionDetail() {
   const [askLoading, setAskLoading] = useState(false);
   const [askQ, setAskQ] = useState("");
   const [askThread, setAskThread] = useState([]);
+  const [askContext, setAskContext] = useState("section"); // "section" | "document"
 
   async function askTutorInSection() {
     if (!askQ.trim()) return;
+    if (askContext === "section" && !sectionId) return;
     setAskLoading(true);
     try {
       setAskThread((t) => [...t, { role: "user", text: askQ }]);
+      const payload =
+        askContext === "section"
+          ? {
+              question: askQ,
+              context: "section",
+              section_id: sectionId,
+              history: askThread.map((m) => ({ role: m.role, text: m.text })),
+            }
+          : {
+              question: askQ,
+              context: "document",
+              history: askThread.map((m) => ({ role: m.role, text: m.text })),
+            };
+
       setAskQ("");
-      const { data } = await axios.post(`${API_BASE}/documents/${docId}/ask`, {
-        question: askQ,
-        context: "section",
-        section_id: sectionId,
-      });
+      const { data } = await axios.post(
+        `${API_BASE}/documents/${docId}/ask`,
+        payload
+      );
       setAskThread((t) => [
         ...t,
         { role: "assistant", text: data?.answer || "No answer returned." },
@@ -452,6 +467,35 @@ export default function SectionDetail() {
               >
                 ✕
               </button>
+            </div>
+
+            <div className="mb-3 flex flex-wrap gap-4 items-center">
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="ask-context"
+                  value="section"
+                  checked={askContext === "section"}
+                  onChange={() => setAskContext("section")}
+                />
+                <span>
+                  Use <span className="font-medium">this section</span> as
+                  context
+                </span>
+              </label>
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="ask-context"
+                  value="document"
+                  checked={askContext === "document"}
+                  onChange={() => setAskContext("document")}
+                />
+                <span>
+                  Use the <span className="font-medium">whole document</span> as
+                  context
+                </span>
+              </label>
             </div>
 
             <div className="mb-3">

@@ -48,6 +48,7 @@ export default function AskTutor() {
       question,
       context: contextType, // "document" | "section"
       section_id: contextType === "section" ? sectionId || null : null,
+      history: thread.map((m) => ({ role: m.role, text: m.text })), // NEW
     };
 
     try {

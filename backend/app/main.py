@@ -680,18 +680,25 @@ def _get_section_text(doc: Dict[str, Any], section_id: str) -> Tuple[str, Dict[s
             return (s.get("text") or "").strip(), s
     raise HTTPException(status_code=404, detail="Section not found")
 
-def _build_ask_messages(context_blob: str, question: str, section_title: Optional[str] = None) -> List[Dict[str, str]]:
+def _build_ask_messages(context_blob: str, section_title: Optional[str] = None) -> List[Dict[str, str]]:
     where = f', specifically the section: "{section_title}"' if section_title else ""
     system_msg = (
         "You are a careful tutor for the provided document. "
-        "Use ONLY the supplied context text to answer. "
-        "If the answer is not in the context, say: 'I don’t see that in the document.' "
-        "Prefer clear, concise explanations. Use markdown when helpful."
+        # "If the question clearly has little to no relevance to the document or its content, say: 'I don’t see that in the document.' "
+        "Use the supplied context text as your primary source. \n"
+        "Conversation rules:\n"
+        "• Continuation: Treat short follow‑ups (e.g., “examples?”, “why?”, “explain more”) as referring to the most recent topic in the conversation. "
+        "• Grounding: Prefer answering using the provided context. Quote or summarize relevant parts when appropriate.\n"
+        "• Background/Extension: If the question asks about a standard background or applicatory concept that is not explicitly defined in the context, "
+        "   give a clear, neutral definition. "
+        "   When possible, connect the concept back to the document's topic.\n"
+        "• Out of scope: Only say “This question appears outside the scope of the provided text.” if the topic is unrelated to both the context "
+        "  and the ongoing conversation. Do not invent details as if they were in the document.\n"
+        "• Style: Prefer clear, concise explanations. Use markdown when helpful."
     )
     user_msg = (
         f"Context below is from the document{where}.\n"
         f"——— START CONTEXT ———\n{context_blob}\n——— END CONTEXT ———\n\n"
-        f"Question: {question}"
     )
     return [
         {"role": "system", "content": system_msg},
@@ -700,40 +707,35 @@ def _build_ask_messages(context_blob: str, question: str, section_title: Optiona
 
 @app.post("/documents/{doc_id}/ask", response_model=AskResponse)
 async def ask_tutor(doc_id: str, payload: AskRequest):
-    """
-    POST /documents/{doc_id}/ask
-    Body: {question, context: "document"|"section", section_id?}
-    Returns: AskResponse(answer, used_context, sources?, token_usage?, warnings?)
-    """
-    # 1) Validate document (and section if needed)
     doc = DOCUMENTS.get(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-
     if payload.context not in ("document", "section"):
         raise HTTPException(status_code=400, detail="context must be 'document' or 'section'")
 
     used_context = payload.context
-    warnings: List[str] = []
-    sources: Optional[List[Dict[str, str]]] = None
+    sources = None
 
-    # 2) Assemble grounded context
     if used_context == "section":
         if not payload.section_id:
             raise HTTPException(status_code=400, detail="section_id is required when context='section'")
         section_text, sec = _get_section_text(doc, payload.section_id)
         if not section_text:
             raise HTTPException(status_code=422, detail="No text found for that section.")
-        messages = _build_ask_messages(section_text, payload.question, section_title=sec.get("title"))
+        messages = _build_ask_messages(section_text, section_title=sec.get("title"))
         sources = [{"section_id": sec.get("id"), "title": sec.get("title")}]
     else:
         doc_text = _get_document_text(doc)
         if not doc_text:
             raise HTTPException(status_code=422, detail="Document has no extracted text.")
-        messages = _build_ask_messages(doc_text, payload.question)
-        # sources can be added in the future if you select specific sections
+        messages = _build_ask_messages(doc_text)
 
-    # 3) Call the model (same client pattern as /explain)
+    # << NEW: include conversation history >>
+    messages.extend(_sanitize_history(payload.history))
+
+    # Current question as the final user turn
+    messages.append({"role": "user", "content": payload.question})
+
     try:
         resp = client.chat.completions.create(
             model="gpt-4.1-nano",
@@ -754,14 +756,29 @@ async def ask_tutor(doc_id: str, payload: AskRequest):
         print("[/documents/{doc_id}/ask] model error:", e)
         raise HTTPException(status_code=502, detail="Upstream model error")
 
-    # 4) Return structured response
     return AskResponse(
         answer=answer,
         used_context=used_context,
         sources=sources if (payload.include_sources or used_context == "section") else None,
         token_usage=token_usage,
-        warnings=warnings or None,
+        warnings=None,
     )
+
+def _sanitize_history(raw_history: Optional[List[Dict[str, str]]], max_turns: int = 6) -> List[Dict[str, str]]:
+    """
+    Accepts items like {"role":"user"|"assistant", "text":"..."} and returns OpenAI messages.
+    Keeps only the most recent `max_turns` entries. Ignores other roles.
+    """
+    if not raw_history:
+        return []
+    msgs: List[Dict[str, str]] = []
+    for h in raw_history[-max_turns:]:
+        role = h.get("role")
+        text = (h.get("text") or "").strip()
+        if role in ("user", "assistant") and text:
+            msgs.append({"role": role, "content": text})
+    return msgs
+
 
 # FOR TESTING PURPOSES:
 @app.on_event("startup")
