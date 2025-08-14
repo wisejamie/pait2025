@@ -1,7 +1,5 @@
 docling==2.41.0
 docling-core==2.42.0
-docling-ibm-models==3.8.1
-docling-parse==4.1.0
 fastapi==0.115.13
 httpx==0.28.1
 openai==1.88.0

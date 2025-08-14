@@ -40,14 +40,6 @@ app.add_middleware(
 Section.update_forward_refs()
 
 # Routes
-@app.get("/")
-def root():
-    return {"ok": True, "service": "PAIT API"}
-
-@app.get("/healthz")
-def healthz():
-    return {"status": "healthy"}
-
 @app.post("/documents/", response_model=DocumentResponse)
 async def upload_document(doc: DocumentInput):
     # Simulate storing and start processing
@@ -691,17 +683,13 @@ def _get_section_text(doc: Dict[str, Any], section_id: str) -> Tuple[str, Dict[s
 def _build_ask_messages(context_blob: str, section_title: Optional[str] = None) -> List[Dict[str, str]]:
     where = f', specifically the section: "{section_title}"' if section_title else ""
     system_msg = (
-        "You are a careful tutor for the provided document. "
-        # "If the question clearly has little to no relevance to the document or its content, say: 'I don’t see that in the document.' "
+        "You are a personal tutor who excels at explaining complex articles and facilitating understanding."
         "Use the supplied context text as your primary source. \n"
         "Conversation rules:\n"
         "• Continuation: Treat short follow‑ups (e.g., “examples?”, “why?”, “explain more”) as referring to the most recent topic in the conversation. "
         "• Grounding: Prefer answering using the provided context. Quote or summarize relevant parts when appropriate.\n"
-        "• Background/Extension: If the question asks about a standard background or applicatory concept that is not explicitly defined in the context, "
-        "   give a clear, neutral definition. "
-        "   When possible, connect the concept back to the document's topic.\n"
-        "• Out of scope: Only say “This question appears outside the scope of the provided text.” if the topic is unrelated to both the context "
-        "  and the ongoing conversation. Do not invent details as if they were in the document.\n"
+        "• Background/Extension: If the question asks about a standard background or applicatory concept that is not explicitly defined in the context, give a clear, neutral definition. When possible, connect the concept back to the document's topic.\n"
+        "• Out of scope: Only say “This question appears outside the scope of the provided text.” if the topic is unrelated to both the context and the ongoing conversation. Do not invent details as if they were in the document.\n"
         "• Style: Prefer clear, concise explanations. Use markdown when helpful."
     )
     user_msg = (
