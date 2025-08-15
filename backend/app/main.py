@@ -31,7 +31,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://ai-tutor-quiz.vercel.app"],
+    allow_origins=["http://localhost:5173", "https://ai-tutor-quiz.vercel.app", "https://ai-tutor-quiz-wisejamies-projects.vercel.app/", "ai-tutor-quiz-git-revert-to-local-memory-wisejamies-projects.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
