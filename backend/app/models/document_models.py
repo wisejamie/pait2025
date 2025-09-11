@@ -16,15 +16,17 @@ class Section(BaseModel):
     title: str
     first_sentence: str
     text: Optional[str] = None
-    sub_sections: Optional[List[Dict]] = []
+    sub_sections: List["Section"] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
 
+class LearningObjectives(BaseModel):
+    objectives: List[str] = Field(default_factory=list)
 
 class SectionDetectionResponse(BaseModel):
     sections: List[Section]
-    learning_objectives: Dict[str, str]
+    learning_objectives: LearningObjectives
 
 
 class DocumentView(BaseModel):
@@ -37,7 +39,7 @@ class DocumentFullView(BaseModel):
     document_id: str
     title: str
     sections: List[Section]
-    learning_objectives: Dict[str, str]
+    learning_objectives: Optional[LearningObjectives] = None
 
 
 class SummaryRequest(BaseModel):

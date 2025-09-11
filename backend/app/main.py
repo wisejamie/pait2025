@@ -172,97 +172,191 @@ def add_section_ids(
     return sections
 
 
+import io
+import PyPDF2
+def _extract_raw_text_basic(pdf_bytes: bytes) -> str:
+    with io.BytesIO(pdf_bytes) as stream:
+        reader = PyPDF2.PdfReader(stream)
+        return "".join((p.extract_text() or "") for p in reader.pages)
+
 @app.post("/documents/upload-file", response_model=DocumentResponse)
-async def upload_document_file(file: UploadFile = File(...), title: str = Form(...)):
-    print(f"[upload] Received file: filename={file.filename!r}, content_type={file.content_type!r}")
-    try:
-        # Read the entire upload into memory once
-        data = await file.read()
-        print(f"[upload]   file size: {len(data)} bytes")
+async def upload_document_file(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    mode: str = Form("basic"),  # "basic" | "advanced"
+):
+    if file.content_type not in ("application/pdf", "text/plain"):
+        raise HTTPException(status_code=400, detail="Unsupported file type")
 
-        if file.content_type == "application/pdf":
-            # Pass raw bytes to PyMuPDF
-            # Run Steps 1–4 and get both cleaned text + visuals
-            raw_text = preprocess_pdf(data)
+    data = await file.read()
+
+    if mode not in ("basic", "advanced"):
+        raise HTTPException(400, "mode must be 'basic' or 'advanced'")
+
+    if file.content_type == "text/plain":
+        raw_text = data.decode("utf-8")
+        visuals = {}
+    else:
+        if mode == "basic":
+            raw_text = _extract_raw_text_basic(data)   # 2024-style raw text
             visuals = {}
-        elif file.content_type == "text/plain":
-            raw_text = data.decode("utf-8")
-            visuals  = {}
         else:
-            raise HTTPException(status_code=400, detail="Unsupported file type")
+            raw_text = preprocess_pdf(data)            # your 2025 docling pipeline
+            visuals = {}  # keep if you attach tables/figures later
+
+    if not raw_text.strip():
+        raise HTTPException(422, "No extractable text. Try Advanced mode or a text-based PDF.")
+
+    doc_id = str(uuid4())
+    DOCUMENTS[doc_id] = {
+        "title": title,
+        "mode": mode,
+        "raw_text": raw_text,
+        "visuals": visuals,
+        "upload_time": datetime.now().isoformat(),
+        "status": "processing",
+        "sections": None,
+        "learning_objectives": None,
+    }
+    return {"document_id": doc_id, "status": "processing"}
+
+# @app.post("/documents/upload-file", response_model=DocumentResponse)
+# async def upload_document_file(file: UploadFile = File(...), title: str = Form(...)):
+#     print(f"[upload] Received file: filename={file.filename!r}, content_type={file.content_type!r}")
+#     try:
+#         # Read the entire upload into memory once
+#         data = await file.read()
+#         print(f"[upload]   file size: {len(data)} bytes")
+
+#         if file.content_type == "application/pdf":
+#             # Pass raw bytes to PyMuPDF
+#             # Run Steps 1–4 and get both cleaned text + visuals
+#             raw_text = preprocess_pdf(data)
+#             visuals = {}
+#         elif file.content_type == "text/plain":
+#             raw_text = data.decode("utf-8")
+#             visuals  = {}
+#         else:
+#             raise HTTPException(status_code=400, detail="Unsupported file type")
         
-        print("[upload]   extracted text length:", len(raw_text))
+#         print("[upload]   extracted text length:", len(raw_text))
 
-        doc_id = str(uuid4())
-        DOCUMENTS[doc_id] = {
-            "title": title,
-            "raw_text": raw_text,
-            "visuals": visuals,
-            "upload_time": datetime.now().isoformat(),
-            "status": "processing",
-            "sections": None,
-            "learning_objectives": None,
-        }
+#         doc_id = str(uuid4())
+#         DOCUMENTS[doc_id] = {
+#             "title": title,
+#             "raw_text": raw_text,
+#             "visuals": visuals,
+#             "upload_time": datetime.now().isoformat(),
+#             "status": "processing",
+#             "sections": None,
+#             "learning_objectives": None,
+#         }
 
-        return {"document_id": doc_id, "status": "processing"}
+#         return {"document_id": doc_id, "status": "processing"}
 
-    except Exception as e:
-        # print full traceback
-        import traceback; traceback.print_exc()
-        raise
+#     except Exception as e:
+#         # print full traceback
+#         import traceback; traceback.print_exc()
+#         raise
 
+from app.legacy_2024 import (
+    extract_sections as legacy_extract_sections,
+    extract_section_text as legacy_anchor_sections,
+    set_article_text as legacy_set_article_text,
+    get_article_text as legacy_get_article_text,
+)
 
 @app.post("/documents/{doc_id}/sections/detect", response_model=SectionDetectionResponse)
 async def detect_sections(doc_id: str):
-    if doc_id not in DOCUMENTS:
-        raise HTTPException(status_code=404, detail="Document not found")
+    doc = DOCUMENTS.get(doc_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
 
-    raw_text = DOCUMENTS[doc_id]["raw_text"]
+    raw_text = doc["raw_text"]
+    mode = doc.get("mode", "advanced")  # default old behavior
 
-    print(">>> detect_sections got raw_text of type", type(raw_text))
-    print(raw_text)
-
-    prompt = build_section_extraction_prompt(raw_text)
-    # prompt = build_section_extraction_prompt(raw_text)
-
-    try:
+    if mode == "basic":
+        # 2024 flow (LLM outline → fuzzy anchor on SAME raw_text)
+        legacy_set_article_text(raw_text)
+        outline = legacy_extract_sections(model="gpt-4.1-nano")  # keep your model choice
+        sections = outline.get("sections", [])
+        learning = outline.get("learning_objectives", {})
+        sections_with_text = legacy_anchor_sections(legacy_get_article_text(), sections)
+    else:
+        # 2025 flow (your existing)
+        prompt = build_section_extraction_prompt(raw_text)
         response = client.chat.completions.create(
             model="gpt-4.1-nano",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
         )
-        gpt_output = response.choices[0].message.content
+        data = json.loads(response.choices[0].message.content)
+        sections = prune_tree(data["sections"])
+        sections_with_text = extract_section_text(raw_text, sections)
+        learning = data["learning_objectives"]
 
-        # Try to safely parse JSON
-        data = json.loads(gpt_output)
-        print(data)
-        sections = data["sections"]
-        sections = prune_tree(sections)
+    # normalize for the rest of your app
+    for s in sections_with_text:
+        s.setdefault("questions", [])
 
-        # Add section text to each section
-        try:
-            sections_with_text = extract_section_text(raw_text, sections)
-            # sections_with_text = extract_section_text(raw_text, sections)
-            for section in sections_with_text:
-                section["questions"] = []
-        except SectionExtractionError as e:
-            raise HTTPException(status_code=422, detail=str(e))
+    doc["sections"] = sections_with_text
+    doc["learning_objectives"] = learning
+    doc["status"] = "ready"
 
-        # Save enriched sections
-        DOCUMENTS[doc_id]["sections"] = sections_with_text
-        DOCUMENTS[doc_id]["learning_objectives"] = data["learning_objectives"]
-        DOCUMENTS[doc_id]["status"] = "ready"
+    return {"sections": sections_with_text, "learning_objectives": learning}
 
-        return {
-            "sections": sections_with_text,
-            "learning_objectives": data["learning_objectives"]
-        }
+# @app.post("/documents/{doc_id}/sections/detect", response_model=SectionDetectionResponse)
+# async def detect_sections(doc_id: str):
+#     if doc_id not in DOCUMENTS:
+#         raise HTTPException(status_code=404, detail="Document not found")
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing GPT response: {e}")
+#     raw_text = DOCUMENTS[doc_id]["raw_text"]
+
+#     print(">>> detect_sections got raw_text of type", type(raw_text))
+#     print(raw_text)
+
+#     prompt = build_section_extraction_prompt(raw_text)
+#     # prompt = build_section_extraction_prompt(raw_text)
+
+#     try:
+#         response = client.chat.completions.create(
+#             model="gpt-4.1-nano",
+#             messages=[
+#                 {"role": "user", "content": prompt}
+#             ],
+#             temperature=0,
+#             response_format={"type": "json_object"}
+#         )
+#         gpt_output = response.choices[0].message.content
+
+#         # Try to safely parse JSON
+#         data = json.loads(gpt_output)
+#         print(data)
+#         sections = data["sections"]
+#         sections = prune_tree(sections)
+
+#         # Add section text to each section
+#         try:
+#             sections_with_text = extract_section_text(raw_text, sections)
+#             # sections_with_text = extract_section_text(raw_text, sections)
+#             for section in sections_with_text:
+#                 section["questions"] = []
+#         except SectionExtractionError as e:
+#             raise HTTPException(status_code=422, detail=str(e))
+
+#         # Save enriched sections
+#         DOCUMENTS[doc_id]["sections"] = sections_with_text
+#         DOCUMENTS[doc_id]["learning_objectives"] = data["learning_objectives"]
+#         DOCUMENTS[doc_id]["status"] = "ready"
+
+#         return {
+#             "sections": sections_with_text,
+#             "learning_objectives": data["learning_objectives"]
+#         }
+
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Error processing GPT response: {e}")
 
 
 @app.get("/documents/{doc_id}", response_model=DocumentFullView)

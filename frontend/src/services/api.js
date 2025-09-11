@@ -14,10 +14,11 @@ export const createDocument = async ({ text, title }) => {
   return data;
 };
 
-export const uploadDocumentFile = async (file, title) => {
+export const uploadDocumentFile = async (file, title, mode = "basic") => {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("title", title);
+  formData.append("mode", mode);
 
   const resp = await fetch(`${API_BASE}/documents/upload-file`, {
     method: "POST",
