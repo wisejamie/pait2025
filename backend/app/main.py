@@ -27,7 +27,9 @@ api_key = os.environ.get('OPENAI_API_KEY')
 # Initialize the OpenAI client
 client = openai.OpenAI(api_key=api_key)
 
+from app.legacy2024_router import legacy2024_router
 app = FastAPI()
+app.include_router(legacy2024_router)
 
 app.add_middleware(
     CORSMiddleware,
