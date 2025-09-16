@@ -51,7 +51,11 @@ export default function Documents() {
 
       const res = uploadFile
         ? await uploadDocumentFile(uploadFile, uploadTitle, effectiveMode)
-        : await createDocument({ text: uploadText, title: uploadTitle }); // treated as Basic on backend
+        : await createDocument({
+            text: uploadText,
+            title: uploadTitle,
+            mode: effectiveMode,
+          }); // treated as Basic on backend
       const docId = res.document_id; // <— use the correct field
       // 2) auto-detect sections
       await detectSections(docId);
@@ -94,6 +98,7 @@ export default function Documents() {
               </Link>
               <p className="text-sm text-gray-500">
                 Uploaded on: {new Date(doc.upload_time).toLocaleString()}
+                {doc.mode ? ` · Mode: ${doc.mode}` : null}
               </p>
             </li>
           ))}

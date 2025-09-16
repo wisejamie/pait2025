@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Literal
 class DocumentInput(BaseModel):
     title: Optional[str] = None
     raw_text: str
+    mode: Optional[Literal["basic", "advanced"]] = "basic"
 
 
 class DocumentResponse(BaseModel):
@@ -33,6 +34,7 @@ class DocumentView(BaseModel):
     document_id: str
     title: str
     upload_time: str  # alternatively, use datetime
+    mode: Optional[Literal["basic", "advanced"]] = "basic"
 
 
 class DocumentFullView(BaseModel):
@@ -40,6 +42,7 @@ class DocumentFullView(BaseModel):
     title: str
     sections: List[Section]
     learning_objectives: Optional[LearningObjectives] = None
+    mode: Optional[Literal["basic", "advanced"]] = "basic"
 
 
 class SummaryRequest(BaseModel):

@@ -66,6 +66,7 @@ async def upload_document(doc: DocumentInput):
         "title": doc.title,
         "raw_text": doc.raw_text,
         "upload_time": datetime.now().isoformat(),
+        "mode": doc.mode or "basic",
         "status": "processing",
         "sections": [],
         "learning_objectives": {},
@@ -80,7 +81,8 @@ def list_documents():
         {
             "document_id": doc_id,
             "title": doc.get("title", "Untitled"),
-            "upload_time": doc.get("upload_time", datetime.now().isoformat())
+            "upload_time": doc.get("upload_time", datetime.now().isoformat()),
+            "mode": doc.get("mode", "basic"),
         }
         for doc_id, doc in DOCUMENTS.items()
     ]
@@ -98,6 +100,7 @@ async def get_document(doc_id: str):
         "status": doc.get("status", "ready"),
         "sections": doc.get("sections", []),
         "learning_objectives": doc.get("learning_objectives", {}),
+        "mode": doc.get("mode", "basic"),
     }
 
 @app.get("/documents/{doc_id}/sections")
@@ -887,12 +890,304 @@ def _sanitize_history(raw_history: Optional[List[Dict[str, str]]], max_turns: in
             msgs.append({"role": role, "content": text})
     return msgs
 
+# ===== Tutor Sessions (3-question open-ended test) =====
+
+TUTOR_SESSIONS: Dict[str, Dict[str, Any]] = {}
+
+class TutorSessionCreateRequest(BaseModel):
+    document_id: str
+    section_id: Optional[str] = None  # if None, test on whole doc
+
+class TutorSessionCreateResponse(BaseModel):
+    session_id: str
+    phase: str
+    assistant_msg: str
+    progress: Optional[Dict[str, Any]] = None
+    done: bool = False
+
+class TutorSessionNextRequest(BaseModel):
+    user_turn: Optional[str] = None  # user answer or “yes/no” to offer
+
+class TutorSessionNextResponse(BaseModel):
+    session_id: str
+    phase: str
+    assistant_msg: str
+    progress: Optional[Dict[str, Any]] = None  # e.g., {"q_index": 0, "total": 3}
+    done: bool = False
+
+def _prompt_build_explanation(context_text: str) -> str:
+    return f"""You are a tutor. Produce a concise, accurate explanation to be used as the grading reference.
+
+CONTEXT (from the paper or section):
+<<<{context_text}>>>
+
+Task:
+1) Write a clear explanation of the MOST IMPORTANT findings/ideas.
+2) Keep it factual and grounded to the context.
+3) 150–250 words. No bullets. No preamble. No references.
+
+Return ONLY the explanation text.
+""".strip()
+
+def _prompt_build_questions(explanation: str) -> str:
+    return f"""You are a tutor. Generate three open-ended questions to test understanding.
+
+EXPLANATION (reference for question design):
+<<<{explanation}>>>
+
+Rules:
+- Each question targets a different key idea.
+- Avoid yes/no and trivial recall.
+- Each answer should naturally be 2–5 sentences.
+
+Return JSON ONLY:
+{{"questions": ["Q1...", "Q2...", "Q3..."]}}
+""".strip()
+
+def _prompt_grade_answer(explanation: str, question: str, user_answer: str) -> str:
+    return f"""Grade the answer using ONLY the Explanation as ground truth.
+
+EXPLANATION:
+<<<{explanation}>>>
+
+QUESTION:
+<<<{question}>>>
+
+LEARNER ANSWER:
+<<<{user_answer}>>>
+
+Tasks:
+1) Decide: CORRECT | PARTIALLY CORRECT | INCORRECT.
+2) If partially/incorrect, provide a brief correction referencing the key idea(s) from the EXPLANATION.
+3) Kind, crisp tone. 3–5 sentences max.
+
+Return JSON ONLY:
+{{
+  "verdict": "correct" | "partial" | "incorrect",
+  "feedback": "one short paragraph of feedback"
+}}
+""".strip()
+
+def _get_context_for_session(doc: Dict[str, Any], section_id: Optional[str]) -> Tuple[str, Optional[str]]:
+    """Return (context_text, section_title)."""
+    if section_id:
+        txt, sec = _get_section_text(doc, section_id)
+        return txt, (sec.get("title") if isinstance(sec, dict) else None)
+    return _get_document_text(doc), None
+
+def _llm_json(client, prompt: str, model: str = "gpt-4.1-nano") -> Dict[str, Any]:
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role":"user","content":prompt}],
+        temperature=0,
+        response_format={"type":"json_object"},
+    )
+    import json as _json
+    return _json.loads(resp.choices[0].message.content)
+
+def _llm_text(client, prompt: str, model: str = "gpt-4.1-nano") -> str:
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role":"user","content":prompt}],
+        temperature=0,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+@app.post("/tutor-sessions/", response_model=TutorSessionCreateResponse)
+def tutor_session_create(req: TutorSessionCreateRequest):
+    doc = DOCUMENTS.get(req.document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    context_text, section_title = _get_context_for_session(doc, req.section_id)
+    if not context_text:
+        raise HTTPException(status_code=422, detail="No context text available for this document/section")
+
+    session_id = str(uuid4())
+    TUTOR_SESSIONS[session_id] = {
+        "document_id": req.document_id,
+        "section_id": req.section_id,
+        "phase": "offer_test",
+        "explanation": None,
+        "questions": None,
+        "answers": [None, None, None],
+        "scores":  [None, None, None],  # True/False for correct/incorrect; partial maps to False for tally
+        "q_index": 0,
+        "history": [],
+        "section_title": section_title,
+    }
+
+    msg = "Would you like a quick 3-question check on this " + ("section?" if req.section_id else "document?")
+    return TutorSessionCreateResponse(
+        session_id=session_id,
+        phase="offer_test",
+        assistant_msg=msg,
+        progress=None,
+        done=False,
+    )
+
+@app.post("/tutor-sessions/{session_id}/next", response_model=TutorSessionNextResponse)
+def tutor_session_next(session_id: str, req: TutorSessionNextRequest):
+    ses = TUTOR_SESSIONS.get(session_id)
+    if not ses:
+        raise HTTPException(status_code=404, detail="Session not found")
+    doc = DOCUMENTS.get(ses["document_id"])
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    phase = ses["phase"]
+    user_turn = (req.user_turn or "").strip()
+    context_text, _ = _get_context_for_session(doc, ses["section_id"])
+
+    # Phase: offer_test
+    if phase == "offer_test":
+        if user_turn.lower() in ("yes", "y", "sure", "ok", "okay", "let's do it", "lets do it"):
+            # Build explanation (private)
+            exp = _llm_text(client, _prompt_build_explanation(context_text))
+            ses["explanation"] = exp
+            ses["phase"] = "make_questions"
+            return TutorSessionNextResponse(
+                session_id=session_id,
+                phase="make_questions",
+                assistant_msg="Great! Give me a moment to set up your questions…",
+                progress=None,
+                done=False,
+            )
+        elif user_turn:
+            # User said no or something else
+            ses["phase"] = "done"
+            return TutorSessionNextResponse(
+                session_id=session_id,
+                phase="done",
+                assistant_msg="No problem. You can start the 3-question check any time.",
+                progress=None,
+                done=True,
+            )
+        else:
+            # Re-ask politely if they didn't answer
+            return TutorSessionNextResponse(
+                session_id=session_id,
+                phase="offer_test",
+                assistant_msg="Would you like a quick 3-question check? (yes/no)",
+                progress=None,
+                done=False,
+            )
+
+    # Phase: make_questions
+    if phase == "make_questions":
+        if not ses.get("explanation"):
+            # safety: rebuild if missing
+            ses["explanation"] = _llm_text(client, _prompt_build_explanation(context_text))
+        data = _llm_json(client, _prompt_build_questions(ses["explanation"]))
+        qs = data.get("questions") or []
+        if len(qs) < 3:
+            raise HTTPException(status_code=502, detail="Could not generate three questions")
+        ses["questions"] = qs[:3]
+        ses["q_index"] = 0
+        ses["phase"] = "ask_q"
+        return TutorSessionNextResponse(
+            session_id=session_id,
+            phase="ask_q",
+            assistant_msg=qs[0],
+            progress={"q_index": 1, "total": 3},
+            done=False,
+        )
+
+    # Phase: ask_q -> waiting for user's answer
+    if phase == "ask_q":
+        if not user_turn:
+            # Prompt the current question again
+            qidx = ses["q_index"]
+            q = ses["questions"][qidx]
+            return TutorSessionNextResponse(
+                session_id=session_id,
+                phase="ask_q",
+                assistant_msg=q,
+                progress={"q_index": qidx+1, "total": 3},
+                done=False,
+            )
+        # We received the user's answer, now evaluate
+        qidx = ses["q_index"]
+        q = ses["questions"][qidx]
+        ses["answers"][qidx] = user_turn
+
+        # Grade
+        grade_json = _llm_json(client, _prompt_grade_answer(ses["explanation"], q, user_turn))
+        verdict = (grade_json.get("verdict") or "").lower()
+        feedback = grade_json.get("feedback") or "Thanks for your answer."
+
+        is_correct = True if verdict == "correct" else False
+        ses["scores"][qidx] = is_correct
+
+        # Move to next phase: show feedback and advance q_index or wrap
+        ses["phase"] = "eval_q"
+        return TutorSessionNextResponse(
+            session_id=session_id,
+            phase="eval_q",
+            assistant_msg=feedback,
+            progress={"q_index": qidx+1, "total": 3, "verdict": verdict},
+            done=False,
+        )
+
+    # Phase: eval_q -> after feedback, either next question or wrap
+    if phase == "eval_q":
+        qidx = ses["q_index"]
+        # Advance to next question if any
+        if qidx < 2:
+            ses["q_index"] += 1
+            ses["phase"] = "ask_q"
+            q = ses["questions"][ses["q_index"]]
+            return TutorSessionNextResponse(
+                session_id=session_id,
+                phase="ask_q",
+                assistant_msg=q,
+                progress={"q_index": ses["q_index"]+1, "total": 3},
+                done=False,
+            )
+        else:
+            # Finished all three — wrap up
+            total = sum(1 for x in ses["scores"] if x is True)
+            ses["phase"] = "wrap_up"
+            wrap_msg = (
+                f"Nice work — you answered {total}/3 correctly.\n\n"
+                f"**Reference Explanation**\n{ses['explanation']}"
+            )
+            return TutorSessionNextResponse(
+                session_id=session_id,
+                phase="wrap_up",
+                assistant_msg=wrap_msg,
+                progress={"correct": total, "total": 3},
+                done=False,
+            )
+
+    # Phase: wrap_up -> any next input ends the session
+    if phase == "wrap_up":
+        ses["phase"] = "done"
+        return TutorSessionNextResponse(
+            session_id=session_id,
+            phase="done",
+            assistant_msg="Great job! If you want, we can run another round or focus on a specific section.",
+            progress=None,
+            done=True,
+        )
+
+    # Fallback
+    ses["phase"] = "done"
+    return TutorSessionNextResponse(
+        session_id=session_id,
+        phase="done",
+        assistant_msg="Session ended.",
+        progress=None,
+        done=True,
+    )
+
 
 # FOR TESTING PURPOSES:
 @app.on_event("startup")
 async def load_test_data():
     DOCUMENTS["test-shultz"] = {"document_id": "test-shultz",
         "title": "Text Understanding in GPT-4 vs. Humans",
+        "mode": "advanced",
         "raw_text":"""## Text Understanding in GPT-4 vs Humans
 
 We examine whether a leading AI system GPT-4 understands text as well as humans do, first using a  well-established standardized test of discourse comprehension. On this test, GPT-4 performs slightly, but not statistically significantly, better than humans given the very high level of human performance.  Both  GPT-4  and  humans  make  correct  inferences  about  information  that  is  not explicitly stated in the text, a critical test of understanding. Next, we use more difficult passages to determine whether that could allow larger differences between GPT-4 and humans. GPT-4 does considerably better on this more difficult text than do the high school and university students for whom these the text passages are designed, as admission tests of student reading comprehension. Deeper exploration of GPT-4's performance on material from one of these admission tests reveals generally accepted signatures of genuine understanding, namely generalization and inference.

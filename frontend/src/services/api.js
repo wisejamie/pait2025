@@ -7,8 +7,8 @@ export const fetchDocuments = async () => {
   return response.data;
 };
 
-export const createDocument = async ({ text, title }) => {
-  const payload = { raw_text: text };
+export const createDocument = async ({ text, title, mode = "basic" }) => {
+  const payload = { raw_text: text, mode };
   if (title) payload.title = title;
   const { data } = await axios.post(`${API_BASE}/documents/`, payload);
   return data;
@@ -83,4 +83,22 @@ export async function askTutor(
     section_id,
   });
   return data; // { answer: string }
+}
+
+export async function createTutorSession(document_id, section_id = null) {
+  const res = await axios.post(`${API_BASE}/tutor-sessions/`, {
+    document_id,
+    section_id,
+  });
+  return res.data; // {session_id, phase, assistant_msg, ...}
+}
+
+export async function nextTutorTurn(session_id, user_turn = null) {
+  const res = await axios.post(
+    `${API_BASE}/tutor-sessions/${session_id}/next`,
+    {
+      user_turn,
+    }
+  );
+  return res.data;
 }
