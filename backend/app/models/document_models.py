@@ -75,3 +75,7 @@ class AskResponse(BaseModel):
     sources: Optional[List[Dict]] = None
     token_usage: Optional[Dict] = None
     warnings: Optional[List[str]] = None
+
+class DocumentSummaryResponse(BaseModel):
+    summary: Optional[str] = None  # None if not yet generated
+    cached: bool = False    

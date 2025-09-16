@@ -1,6 +1,12 @@
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { askTutor, createTutorSession, nextTutorTurn } from "../services/api";
+import {
+  askTutor,
+  createTutorSession,
+  nextTutorTurn,
+  fetchSummary,
+  streamSummary,
+} from "../services/api";
 import axios from "axios";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -30,6 +36,13 @@ export default function DocumentDetail() {
   const [tutorProgress, setTutorProgress] = useState(null); // {q_index,total,...}
   const [inTestMode, setInTestMode] = useState(false);
 
+  // Summary state (Basic)
+  const [summary, setSummary] = useState("");
+  const [summaryCached, setSummaryCached] = useState(false);
+  const [summaryStreaming, setSummaryStreaming] = useState(false);
+  const [summaryError, setSummaryError] = useState(null);
+  const [summaryES, setSummaryES] = useState(null);
+
   const getDescendantIds = (section) => {
     let ids = [section.id];
     if (section.sub_sections) {
@@ -39,6 +52,15 @@ export default function DocumentDetail() {
     }
     return ids;
   };
+
+  useEffect(() => {
+    // Cleanup any open EventSource on id change/unmount
+    return () => {
+      if (summaryES) {
+        summaryES.close?.();
+      }
+    };
+  }, [summaryES]);
 
   useEffect(() => {
     async function load() {
@@ -74,6 +96,40 @@ export default function DocumentDetail() {
         // choose a sensible default section for chat
         if ((response.sections || []).length > 0) {
           setCurrentSectionId(response.sections[0].id);
+        }
+
+        // --- BASIC: fetch or stream the summary ---
+        if ((docRes.data.mode || "advanced") === "basic") {
+          setSummary("");
+          setSummaryCached(false);
+          setSummaryStreaming(false);
+          setSummaryError(null);
+          try {
+            const s = await fetchSummary(id);
+            if (s.cached && s.summary) {
+              setSummary(s.summary);
+              setSummaryCached(true);
+            } else {
+              // Start SSE stream
+              setSummaryStreaming(true);
+              const es = streamSummary(id, {
+                onChunk: (chunk) => setSummary((prev) => prev + chunk),
+                onDone: () => {
+                  setSummaryStreaming(false);
+                  setSummaryCached(true); // it’s now stored server-side
+                  setSummaryES(null);
+                },
+                onError: (err) => {
+                  setSummaryStreaming(false);
+                  setSummaryError(err || "Stream error");
+                  setSummaryES(null);
+                },
+              });
+              setSummaryES(es);
+            }
+          } catch (e) {
+            setSummaryError("Failed to load summary.");
+          }
         }
       } catch (err) {
         console.error("Failed to load document or sections:", err);
@@ -270,13 +326,40 @@ export default function DocumentDetail() {
   };
 
   // BASIC LAYOUT
+  // BASIC LAYOUT with Summary panel at the top
   if (mode === "basic") {
     return (
       <div className="p-6">
-        <h1 className="text-2xl font-bold mb-2">📘 {title}</h1>
+        <h1 className="text-2xl font-bold mb-4">📘 {title}</h1>
+
+        {/* Overall Summary */}
+        <div className="mb-4 bg-white rounded shadow p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-lg font-semibold">Overall Summary</h2>
+            {summaryStreaming && (
+              <span className="text-xs text-gray-500">Streaming…</span>
+            )}
+          </div>
+          {summaryError ? (
+            <div className="text-sm text-red-600">
+              {summaryError}{" "}
+              <span className="text-gray-500">(try reloading)</span>
+            </div>
+          ) : summary ? (
+            <div className="prose max-w-none whitespace-pre-wrap">
+              {summary}
+            </div>
+          ) : (
+            <div className="animate-pulse text-gray-500 text-sm">
+              Preparing a concise summary of the document…
+            </div>
+          )}
+        </div>
+
+        {/* Optional: Global learning objectives */}
         {objectives?.objectives?.length ? (
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold mb-1">
+          <div className="mb-4 bg-white rounded shadow p-4">
+            <h2 className="text-lg font-semibold mb-2">
               Global Learning Objectives
             </h2>
             <ul className="list-disc list-inside text-gray-700">
@@ -288,7 +371,7 @@ export default function DocumentDetail() {
         ) : null}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* TOC */}
+          {/* TOC + Quiz controls */}
           <div className="md:col-span-1 bg-white rounded shadow p-3">
             <h3 className="font-semibold mb-2">Sections</h3>
             <ul className="space-y-1">{renderSectionTreeBasic(sections)}</ul>
@@ -325,36 +408,28 @@ export default function DocumentDetail() {
                   Start Full Quiz
                 </button>
               )}
+              <button
+                onClick={startThreeQTest}
+                disabled={!currentSectionId || inTestMode}
+                className="w-full px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded disabled:opacity-50"
+              >
+                Test me on this section (3 Qs)
+              </button>
             </div>
           </div>
 
-          {/* Tutor Panel */}
+          {/* Tutor Chat */}
           <div className="md:col-span-2 bg-white rounded shadow p-3 flex flex-col">
             <div className="mb-2 text-sm text-gray-600">
               {currentSectionId
                 ? "Chatting about the selected section."
                 : "Select a section to begin."}
             </div>
-            <div className="mb-3 flex gap-2">
-              <button
-                onClick={startThreeQTest}
-                disabled={!currentSectionId || inTestMode}
-                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded disabled:opacity-50"
-              >
-                Test me on this section (3 Qs)
-              </button>
-              {inTestMode && tutorProgress?.q_index && (
-                <span className="text-xs text-gray-600 self-center">
-                  Question {tutorProgress.q_index} of {tutorProgress.total}
-                </span>
-              )}
-            </div>
             <div className="flex-1 overflow-y-auto border rounded p-3 space-y-3">
               {chatHistory.length === 0 ? (
                 <div className="text-gray-500 text-sm">
                   Tip: Ask things like “Explain this section”, “Give me an
-                  example”, “Why does this matter?”, or paste a sentence you
-                  want clarified.
+                  example”, or “Why does this matter?”
                 </div>
               ) : (
                 chatHistory.map((m, i) => (
@@ -375,14 +450,13 @@ export default function DocumentDetail() {
                 ))
               )}
             </div>
-
+            {/* Quick replies for test offer/ask phases */}
             {inTestMode && (
               <div className="mt-2 flex flex-wrap gap-2 text-sm">
                 {tutorPhase === "offer_test" ? (
                   <>
                     <button
                       onClick={() => {
-                        // append "Yes" visibly then send to session
                         setChatHistory((h) => [
                           ...h,
                           { role: "user", text: "Yes" },
@@ -427,7 +501,6 @@ export default function DocumentDetail() {
                 ) : null}
               </div>
             )}
-
             <div className="mt-3 flex gap-2">
               <input
                 className="flex-1 border rounded px-3 py-2"
@@ -450,26 +523,6 @@ export default function DocumentDetail() {
               >
                 {sending ? "Sending…" : inTestMode ? "Submit answer" : "Send"}
               </button>
-            </div>
-            {/* Quick prompts */}
-            <div className="mt-2 flex flex-wrap gap-2 text-sm">
-              {[
-                "Explain this section",
-                "What are the key ideas?",
-                "Ask me an open-ended question",
-              ].map((t) => (
-                <button
-                  key={t}
-                  onClick={() => {
-                    setChatInput(t);
-                    setTimeout(sendChat, 0);
-                  }}
-                  disabled={!currentSectionId || sending}
-                  className="px-2 py-1 border rounded hover:bg-gray-50"
-                >
-                  {t}
-                </button>
-              ))}
             </div>
           </div>
         </div>

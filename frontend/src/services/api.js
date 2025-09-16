@@ -102,3 +102,32 @@ export async function nextTutorTurn(session_id, user_turn = null) {
   );
   return res.data;
 }
+
+// --- SUMMARY (Basic) ---
+export async function fetchSummary(docId) {
+  const { data } = await axios.get(`${API_BASE}/documents/${docId}/summary`);
+  return data; // { summary: string|null, cached: boolean }
+}
+
+// Server-Sent Events stream; returns the EventSource so caller can close it
+export function streamSummary(docId, { onChunk, onDone, onError } = {}) {
+  const es = new EventSource(`${API_BASE}/documents/${docId}/summary/stream`);
+  es.onmessage = (evt) => {
+    // default SSE "message" → deliver text chunks
+    if (onChunk) onChunk(evt.data || "");
+  };
+  es.addEventListener("done", () => {
+    if (onDone) onDone();
+    es.close();
+  });
+  es.addEventListener("error", (evt) => {
+    try {
+      const payload = JSON.parse(evt.data || "{}");
+      if (onError) onError(payload?.error || "stream error");
+    } catch {
+      if (onError) onError("stream error");
+    }
+    es.close();
+  });
+  return es;
+}

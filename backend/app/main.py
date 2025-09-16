@@ -223,45 +223,6 @@ async def upload_document_file(
     }
     return {"document_id": doc_id, "status": "processing"}
 
-# @app.post("/documents/upload-file", response_model=DocumentResponse)
-# async def upload_document_file(file: UploadFile = File(...), title: str = Form(...)):
-#     print(f"[upload] Received file: filename={file.filename!r}, content_type={file.content_type!r}")
-#     try:
-#         # Read the entire upload into memory once
-#         data = await file.read()
-#         print(f"[upload]   file size: {len(data)} bytes")
-
-#         if file.content_type == "application/pdf":
-#             # Pass raw bytes to PyMuPDF
-#             # Run Steps 1–4 and get both cleaned text + visuals
-#             raw_text = preprocess_pdf(data)
-#             visuals = {}
-#         elif file.content_type == "text/plain":
-#             raw_text = data.decode("utf-8")
-#             visuals  = {}
-#         else:
-#             raise HTTPException(status_code=400, detail="Unsupported file type")
-        
-#         print("[upload]   extracted text length:", len(raw_text))
-
-#         doc_id = str(uuid4())
-#         DOCUMENTS[doc_id] = {
-#             "title": title,
-#             "raw_text": raw_text,
-#             "visuals": visuals,
-#             "upload_time": datetime.now().isoformat(),
-#             "status": "processing",
-#             "sections": None,
-#             "learning_objectives": None,
-#         }
-
-#         return {"document_id": doc_id, "status": "processing"}
-
-#     except Exception as e:
-#         # print full traceback
-#         import traceback; traceback.print_exc()
-#         raise
-
 from app.legacy_2024 import (
     extract_sections as legacy_extract_sections,
     extract_section_text as legacy_anchor_sections,
@@ -308,59 +269,6 @@ async def detect_sections(doc_id: str):
     doc["status"] = "ready"
 
     return {"sections": sections_with_text, "learning_objectives": learning}
-
-# @app.post("/documents/{doc_id}/sections/detect", response_model=SectionDetectionResponse)
-# async def detect_sections(doc_id: str):
-#     if doc_id not in DOCUMENTS:
-#         raise HTTPException(status_code=404, detail="Document not found")
-
-#     raw_text = DOCUMENTS[doc_id]["raw_text"]
-
-#     print(">>> detect_sections got raw_text of type", type(raw_text))
-#     print(raw_text)
-
-#     prompt = build_section_extraction_prompt(raw_text)
-#     # prompt = build_section_extraction_prompt(raw_text)
-
-#     try:
-#         response = client.chat.completions.create(
-#             model="gpt-4.1-nano",
-#             messages=[
-#                 {"role": "user", "content": prompt}
-#             ],
-#             temperature=0,
-#             response_format={"type": "json_object"}
-#         )
-#         gpt_output = response.choices[0].message.content
-
-#         # Try to safely parse JSON
-#         data = json.loads(gpt_output)
-#         print(data)
-#         sections = data["sections"]
-#         sections = prune_tree(sections)
-
-#         # Add section text to each section
-#         try:
-#             sections_with_text = extract_section_text(raw_text, sections)
-#             # sections_with_text = extract_section_text(raw_text, sections)
-#             for section in sections_with_text:
-#                 section["questions"] = []
-#         except SectionExtractionError as e:
-#             raise HTTPException(status_code=422, detail=str(e))
-
-#         # Save enriched sections
-#         DOCUMENTS[doc_id]["sections"] = sections_with_text
-#         DOCUMENTS[doc_id]["learning_objectives"] = data["learning_objectives"]
-#         DOCUMENTS[doc_id]["status"] = "ready"
-
-#         return {
-#             "sections": sections_with_text,
-#             "learning_objectives": data["learning_objectives"]
-#         }
-
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Error processing GPT response: {e}")
-
 
 @app.get("/documents/{doc_id}", response_model=DocumentFullView)
 async def get_document(doc_id: str):
@@ -1180,6 +1088,119 @@ def tutor_session_next(session_id: str, req: TutorSessionNextRequest):
         progress=None,
         done=True,
     )
+
+# ===== Basic-mode summary cache helpers =====
+
+def _ensure_basic_cache(doc: Dict[str, Any]) -> Dict[str, Any]:
+    cache = doc.get("basic_cache")
+    if cache is None:
+        cache = {"overall_summary": None, "micro_summaries": {}, "working_memory": {}}
+        doc["basic_cache"] = cache
+    else:
+        cache.setdefault("overall_summary", None)
+        cache.setdefault("micro_summaries", {})
+        cache.setdefault("working_memory", {})
+    return cache
+
+def _build_overall_summary_prompt(doc_text: str, max_chars: int = 38000) -> str:
+    text = (doc_text or "").strip()
+    if len(text) > max_chars:
+        text = text[:max_chars]
+    return f"""
+You are a tutor. Write a clear, student-focused summary of the article.
+
+Context (raw text; may be noisy):
+<<<{text}>>>
+
+Instructions:
+- Summarize the article’s main ideas and findings.
+- Keep it factual and grounded in the context.
+- 150–220 words. One to three short paragraphs. No lists, no citations.
+Return only the summary text.
+""".strip()
+
+from app.models.document_models import DocumentSummaryResponse
+from fastapi.responses import StreamingResponse
+import json as _json
+
+@app.get("/documents/{doc_id}/summary", response_model=DocumentSummaryResponse)
+def get_document_summary(doc_id: str):
+    doc = DOCUMENTS.get(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    cache = _ensure_basic_cache(doc)
+    overall = cache.get("overall_summary")
+    if overall and isinstance(overall, dict) and overall.get("text"):
+        return DocumentSummaryResponse(summary=overall["text"], cached=True)
+    return DocumentSummaryResponse(summary=None, cached=False)
+
+def _sse_format(data: str) -> str:
+    # SSE: each event starts with "data: ...\n\n"
+    # Split long lines safely
+    lines = data.split("\n")
+    return "".join(f"data: {line}\n" for line in lines) + "\n"
+
+@app.get("/documents/{doc_id}/summary/stream")
+def stream_document_summary(doc_id: str):
+    """
+    Server-Sent Events (SSE) that streams the overall summary.
+    If already cached, we emit it immediately and end.
+    """
+    doc = DOCUMENTS.get(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Prefer raw text or stitch if necessary
+    doc_text = _get_document_text(doc)
+    if not doc_text:
+        raise HTTPException(status_code=422, detail="Document has no extractable text.")
+
+    cache = _ensure_basic_cache(doc)
+    existing = cache.get("overall_summary")
+
+    def event_generator():
+        # If cached, emit once and end.
+        if existing and isinstance(existing, dict) and existing.get("text"):
+            yield _sse_format(existing["text"])
+            yield "event: done\ndata: {}\n\n"
+            return
+
+        # Build prompt and stream from the LLM
+        prompt = _build_overall_summary_prompt(doc_text)
+
+        full_chunks = []
+        try:
+            # OpenAI v1 client supports stream=True
+            stream = client.chat.completions.create(
+                model="gpt-4.1-nano",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                stream=True,
+            )
+            for chunk in stream:
+                # Each chunk has choices[0].delta.content (may be None)
+                delta = None
+                try:
+                    delta = chunk.choices[0].delta.content
+                except Exception:
+                    delta = None
+                if delta:
+                    full_chunks.append(delta)
+                    yield _sse_format(delta)
+            # Done streaming — cache result
+            final_text = "".join(full_chunks).strip()
+            cache["overall_summary"] = {
+                "text": final_text,
+                "created_at": datetime.now().isoformat()
+            }
+            yield "event: done\ndata: {}\n\n"
+        except Exception as e:
+            # Emit an error event; client can show a retry UI
+            err = {"error": str(e)}
+            yield f"event: error\ndata: {_json.dumps(err)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # FOR TESTING PURPOSES:
