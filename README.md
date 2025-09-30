@@ -1,56 +1,38 @@
-# Tutor App: Adaptive Quiz Generator for Complex Texts
+# Personal AI Tutor (PAIT)
 
-This app turns difficult documents into adaptive, interactive quizzes designed to help users understand complex material through guided question-based learning.
+An AI-powered tutor that helps users **understand difficult documents** through summaries, guided conversations, and adaptive quizzes.  
+The app combines the simplicity of the original 2024 PAIT conversational model with the more polished full-stack web app developed in 2025.
 
-## 🚀 MVP Features
+---
 
-- Upload or paste a document
-- GPT-based section detection
-- Automatic multiple-choice question generation
-- Adaptive quiz experience with feedback
-- Summary of performance and weak topics
+## ✨ Core Features
+
+- **Upload PDFs or text** → choose between two processing modes:
+  - **Basic mode (recommended):**  
+    Fast, reliable text extraction for any PDF. Produces conversational summaries and supports guided Q&A (like the 2024 version).
+  - **Advanced mode:**  
+    Extracts cleaned, displayable Markdown from simple PDFs. Supports section navigation, readable document text, and quizzes.
+- **GPT-based section detection** (Basic = raw anchor text, Advanced = structured Markdown).
+- **Tutor interactions:**  
+  - Ask free-form questions  
+  - Guided open-ended question testing (3-question pipeline)  
+  - Section exploration (“zoom in / out”)  
+- **Quiz generation** from document or sections, with performance feedback.
+- **Caching** for summaries and micro-summaries to speed up repeat visits.
+
+---
 
 ## 🛠 Tech Stack
 
-- **Backend:** FastAPI (Python)
-- **Frontend:** Next.js (React)
-- **LLM:** GPT-4 via OpenAI API
-- **Storage:** To be determined (likely SQLite or Supabase for MVP)
+- **Backend:** FastAPI (Python 3.9)  
+- **Frontend:** React (Vite, TailwindCSS)  
+- **LLM:** GPT-4.1-nano (via OpenAI API)  
+- **Storage:** In-memory during dev; SQLite planned for persistence  
+- **Deployment:** Vercel (frontend) + Render (backend) for MVP
 
-## 📁 Project Structure
-
-```
-.
-├── LICENSE                 # Project license
-├── README.md               # Project overview and setup instructions
-├── backend/                # Backend code (FastAPI)
-│   ├── app/                # Main FastAPI application logic
-│   └── tests/              # Unit and integration tests for backend
-├── frontend/               # Frontend code (Next.js)
-│   ├── components/         # React UI components
-│   └── pages/              # Next.js page routes
-├── docs/                   # Internal documentation (timeline, planning notes) 
-```
-
-## ✅ Getting Started
-
-1. Clone the repo  
-   `git clone https://github.com/your-username/tutor-app.git`
-
-2. Set up a Python virtual environment  
-   `python -m venv venv && source venv/bin/activate`
-
-3. Install backend dependencies  
-   `pip install -r backend/requirements.txt` *(once backend is scaffolded)*
-
-## 📌 Goals
-
-- Make scientific and academic texts more accessible
-- Support self-paced learning with structured guidance
-- Launch MVP by early July 2025
+---
 
 ## 📝 Notes
 
-- This README will be updated as features are added.
-- Development begins June 9, 2025.
-- Frontend and deployment setup to come later.
+- When first using the app, please allow a few minutes for the backend to load. We use a free Render instance that spins down after inactivity.
+- **Advanced mode limitation**: it does not reliably extract correctly formatted text from PDFs that use complex layouts (e.g., multi-column, heavy figures).
