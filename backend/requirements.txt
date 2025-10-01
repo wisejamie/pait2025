@@ -8,4 +8,3 @@ python-dotenv==1.1.0
 python-multipart==0.0.20
 rapidfuzz==3.13.0
 uvicorn==0.29.0
-PyPDF2
