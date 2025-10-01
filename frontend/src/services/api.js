@@ -85,10 +85,15 @@ export async function askTutor(
   return data; // { answer: string }
 }
 
-export async function createTutorSession(document_id, section_id = null) {
+export async function createTutorSession(
+  document_id,
+  section_id = null,
+  autostart = false
+) {
   const res = await axios.post(`${API_BASE}/tutor-sessions/`, {
     document_id,
     section_id,
+    autostart,
   });
   return res.data; // {session_id, phase, assistant_msg, ...}
 }

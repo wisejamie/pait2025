@@ -804,7 +804,8 @@ TUTOR_SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 class TutorSessionCreateRequest(BaseModel):
     document_id: str
-    section_id: Optional[str] = None  # if None, test on whole doc
+    section_id: Optional[str] = None
+    autostart: Optional[bool] = False  # <-- NEW
 
 class TutorSessionCreateResponse(BaseModel):
     session_id: str
@@ -901,6 +902,103 @@ def _llm_text(client, prompt: str, model: str = "gpt-4.1-nano") -> str:
     )
     return (resp.choices[0].message.content or "").strip()
 
+# ===== Memory helpers =====
+from typing import Any, Dict, List, Optional
+
+def _ensure_session_memory(ses: Dict[str, Any]) -> List[Dict[str, Any]]:
+    mem = ses.get("memory")
+    if mem is None:
+        mem = []
+        ses["memory"] = mem
+    return mem
+
+def _append_memory(
+    ses: Dict[str, Any],
+    role: str,
+    text: str,
+    meta: Optional[Dict[str, Any]] = None
+) -> None:
+    mem = _ensure_session_memory(ses)
+    entry: Dict[str, Any] = {"role": role, "text": text}
+    if meta:
+        entry["meta"] = meta
+    mem.append(entry)
+
+def _format_memory_as_context(ses: Dict[str, Any], max_turns: int = 12) -> str:
+    """
+    Render last N turns as a compact transcript for LLM grounding.
+    """
+    mem = _ensure_session_memory(ses)
+    recent = mem[-max_turns:]
+    lines: List[str] = []
+    for m in recent:
+        r = (m.get("role") or "user").upper()
+        t = (m.get("text") or "").strip()
+        if t:
+            lines.append(f"{r}: {t}")
+    return "\n".join(lines).strip()
+
+def _llm_text_with_memory(
+    client,
+    system_prompt: str,
+    user_prompt: str,
+    ses: Dict[str, Any],
+    temperature: float = 0.0,
+) -> str:
+    """
+    Single-shot text completion that includes recent memory as additional grounding.
+    """
+    transcript = _format_memory_as_context(ses)
+    user = f"{user_prompt}\n\n---\nRecent conversation:\n{transcript}" if transcript else user_prompt
+    resp = client.chat.completions.create(
+        model="gpt-4.1-nano",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user},
+        ],
+        temperature=temperature,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+def _llm_json_with_memory(
+    client,
+    system_prompt: str,
+    user_prompt: str,
+    ses: Dict[str, Any],
+    temperature: float = 0.0,
+) -> Dict[str, Any]:
+    transcript = _format_memory_as_context(ses)
+    user = f"{user_prompt}\n\n---\nRecent conversation:\n{transcript}" if transcript else user_prompt
+    res = client.chat.completions.create(
+        model="gpt-4.1-nano",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user},
+        ],
+        temperature=temperature,
+        response_format={"type": "json_object"},
+    )
+    import json as _json
+    raw = (res.choices[0].message.content or "").strip()
+    try:
+        return _json.loads(raw)
+    except Exception:
+        # try to salvage a JSON object if the model wrapped it
+        start = raw.find("{")
+        if start != -1:
+            depth = 0
+            for i, ch in enumerate(raw[start:], start=start):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return _json.loads(raw[start:i+1])
+                        except Exception:
+                            break
+    return {}
+
 @app.post("/tutor-sessions/", response_model=TutorSessionCreateResponse)
 def tutor_session_create(req: TutorSessionCreateRequest):
     doc = DOCUMENTS.get(req.document_id)
@@ -919,12 +1017,49 @@ def tutor_session_create(req: TutorSessionCreateRequest):
         "explanation": None,
         "questions": None,
         "answers": [None, None, None],
-        "scores":  [None, None, None],  # True/False for correct/incorrect; partial maps to False for tally
+        "scores":  [None, None, None],
         "q_index": 0,
         "history": [],
         "section_title": section_title,
+        # NEW
+        "memory": [],
     }
 
+    if req.autostart:
+        try:
+            exp = _llm_text(client, _prompt_build_explanation(context_text))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"LLM error building explanation: {e}")
+
+        try:
+            data = _llm_json(client, _prompt_build_questions(exp))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"LLM error building questions: {e}")
+
+        qs = (data.get("questions") or [])[:3]
+
+        if len(qs) < 3:
+            raise HTTPException(status_code=502, detail="Could not generate three questions")
+
+         # after computing `qs`
+        _append_memory(TUTOR_SESSIONS[session_id], "assistant", qs[0], meta={"type":"question", "q_index": 0})
+
+        TUTOR_SESSIONS[session_id].update({
+            "explanation": exp,
+            "questions": qs,
+            "q_index": 0,
+            "phase": "ask_q",
+        })
+        return TutorSessionCreateResponse(
+            session_id=session_id,
+            phase="ask_q",
+            assistant_msg=qs[0],
+            progress={"q_index": 1, "total": 3},
+            done=False,
+        )
+
+
+    # Default (non-autostart): keep the old prompt
     msg = "Would you like a quick 3-question check on this " + ("section?" if req.section_id else "document?")
     return TutorSessionCreateResponse(
         session_id=session_id,
@@ -943,151 +1078,170 @@ def tutor_session_next(session_id: str, req: TutorSessionNextRequest):
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    phase = ses["phase"]
+    phase = ses.get("phase")
     user_turn = (req.user_turn or "").strip()
-    context_text, _ = _get_context_for_session(doc, ses["section_id"])
+    context_text, _ = _get_context_for_session(doc, ses.get("section_id"))
 
-    # Phase: offer_test
+    # --- log user turn into memory (if any) ---
+    if user_turn:
+        _append_memory(ses, "user", user_turn)
+
+    def _is_next_intent(s: str) -> bool:
+        if not s: return False
+        s = s.lower()
+        return s in {"next","next q","next question","continue","move on","go on","proceed","skip","next one","next please","n","->"} \
+               or "next" in s or "continue" in s or "move on" in s
+
+    def _is_answer_intent(s: str) -> bool:
+        if not s: return False
+        s = s.lower()
+        # broad triggers
+        return any(kw in s for kw in [
+            "answer the question", "what is the answer", "can you answer", "give me the answer",
+            "what's the answer", "tell me the answer", "just answer"
+        ])
+
+    # ----- offer_test (unchanged except: append assistant) -----
     if phase == "offer_test":
-        if user_turn.lower() in ("yes", "y", "sure", "ok", "okay", "let's do it", "lets do it"):
-            # Build explanation (private)
+        if user_turn.lower() in ("yes","y","sure","ok","okay","lets do it","let's do it"):
+            if not context_text:
+                raise HTTPException(status_code=422, detail="No context text available")
             exp = _llm_text(client, _prompt_build_explanation(context_text))
             ses["explanation"] = exp
-            ses["phase"] = "make_questions"
+            data = _llm_json(client, _prompt_build_questions(exp))
+            qs = (data.get("questions") or [])[:3]
+            if len(qs) < 3:
+                raise HTTPException(status_code=502, detail="Could not generate three questions")
+            ses["questions"] = qs
+            ses["q_index"] = 0
+            ses["phase"] = "ask_q"
+            _append_memory(ses, "assistant", qs[0], meta={"type":"question","q_index":0})
             return TutorSessionNextResponse(
-                session_id=session_id,
-                phase="make_questions",
-                assistant_msg="Great! Give me a moment to set up your questions…",
-                progress=None,
-                done=False,
+                session_id=session_id, phase="ask_q", assistant_msg=qs[0],
+                progress={"q_index":1,"total":3}, done=False
             )
         elif user_turn:
-            # User said no or something else
             ses["phase"] = "done"
-            return TutorSessionNextResponse(
-                session_id=session_id,
-                phase="done",
-                assistant_msg="No problem. You can start the 3-question check any time.",
-                progress=None,
-                done=True,
-            )
-        else:
-            # Re-ask politely if they didn't answer
-            return TutorSessionNextResponse(
-                session_id=session_id,
-                phase="offer_test",
-                assistant_msg="Would you like a quick 3-question check? (yes/no)",
-                progress=None,
-                done=False,
-            )
+            msg = "No problem. You can start the 3-question check any time."
+            _append_memory(ses, "assistant", msg)
+            return TutorSessionNextResponse(session_id=session_id, phase="done", assistant_msg=msg, progress=None, done=True)
 
-    # Phase: make_questions
+        msg = "Would you like a quick 3-question check? (yes/no)"
+        _append_memory(ses, "assistant", msg)
+        return TutorSessionNextResponse(session_id=session_id, phase="offer_test", assistant_msg=msg, progress=None, done=False)
+
+    # ----- make_questions (append assistant) -----
     if phase == "make_questions":
         if not ses.get("explanation"):
-            # safety: rebuild if missing
             ses["explanation"] = _llm_text(client, _prompt_build_explanation(context_text))
         data = _llm_json(client, _prompt_build_questions(ses["explanation"]))
-        qs = data.get("questions") or []
+        qs = (data.get("questions") or [])[:3]
         if len(qs) < 3:
             raise HTTPException(status_code=502, detail="Could not generate three questions")
-        ses["questions"] = qs[:3]
+        ses["questions"] = qs
         ses["q_index"] = 0
         ses["phase"] = "ask_q"
-        return TutorSessionNextResponse(
-            session_id=session_id,
-            phase="ask_q",
-            assistant_msg=qs[0],
-            progress={"q_index": 1, "total": 3},
-            done=False,
-        )
+        _append_memory(ses, "assistant", qs[0], meta={"type":"question","q_index":0})
+        return TutorSessionNextResponse(session_id=session_id, phase="ask_q", assistant_msg=qs[0], progress={"q_index":1,"total":3}, done=False)
 
-    # Phase: ask_q -> waiting for user's answer
+    # ----- ask_q -----
     if phase == "ask_q":
-        if not user_turn:
-            # Prompt the current question again
-            qidx = ses["q_index"]
-            q = ses["questions"][qidx]
-            return TutorSessionNextResponse(
-                session_id=session_id,
-                phase="ask_q",
-                assistant_msg=q,
-                progress={"q_index": qidx+1, "total": 3},
-                done=False,
-            )
-        # We received the user's answer, now evaluate
         qidx = ses["q_index"]
         q = ses["questions"][qidx]
-        ses["answers"][qidx] = user_turn
 
-        # Grade
-        grade_json = _llm_json(client, _prompt_grade_answer(ses["explanation"], q, user_turn))
+        # User might ask for the answer instead of answering
+        if _is_answer_intent(user_turn):
+            ans = _llm_text_with_memory(
+                client,
+                system_prompt="You are a concise, helpful tutor.",
+                user_prompt=f"Answer this question directly and clearly, grounded in the explanation.\n\nQUESTION:\n{q}\n\nEXPLANATION:\n{ses['explanation']}",
+                ses=ses,
+            )
+            # stay in review_q so they can ask follow-ups or say "next"
+            ses["phase"] = "review_q"
+            _append_memory(ses, "assistant", ans, meta={"type":"direct_answer","q_index":qidx})
+            msg = ans + "\n\nWould you like to ask me anything more about this, or should we move on to the next question?"
+            _append_memory(ses, "assistant", msg)
+            return TutorSessionNextResponse(session_id=session_id, phase="review_q", assistant_msg=msg, progress={"q_index":qidx+1,"total":3}, done=False)
+
+        # If no user answer, repeat the question
+        if not user_turn:
+            _append_memory(ses, "assistant", q, meta={"type":"question","q_index":qidx})
+            return TutorSessionNextResponse(session_id=session_id, phase="ask_q", assistant_msg=q, progress={"q_index":qidx+1,"total":3}, done=False)
+
+        # Grade the answer (memory-aware)
+        grade_json = _llm_json_with_memory(
+            client,
+            system_prompt="You are a strict but supportive grader. Return JSON with 'verdict' and 'feedback'.",
+            user_prompt=_prompt_grade_answer(ses["explanation"], q, user_turn),
+            ses=ses,
+        )
         verdict = (grade_json.get("verdict") or "").lower()
         feedback = grade_json.get("feedback") or "Thanks for your answer."
-
         is_correct = True if verdict == "correct" else False
+        ses["answers"][qidx] = user_turn
         ses["scores"][qidx] = is_correct
+        ses.setdefault("history", []).append({"q": q, "a": user_turn, "fb": feedback})
 
-        # Move to next phase: show feedback and advance q_index or wrap
-        ses["phase"] = "eval_q"
-        return TutorSessionNextResponse(
-            session_id=session_id,
-            phase="eval_q",
-            assistant_msg=feedback,
-            progress={"q_index": qidx+1, "total": 3, "verdict": verdict},
-            done=False,
-        )
+        # Move to review_q for follow-ups or 'next'
+        ses["phase"] = "review_q"
+        msg = f"{feedback}\n\nWould you like to ask me anything more about this, or should we move on to the next question?"
+        _append_memory(ses, "assistant", msg, meta={"type":"feedback","q_index":qidx, "verdict": verdict})
+        return TutorSessionNextResponse(session_id=session_id, phase="review_q", assistant_msg=msg, progress={"q_index":qidx+1,"total":3,"verdict":verdict}, done=False)
 
-    # Phase: eval_q -> after feedback, either next question or wrap
-    if phase == "eval_q":
+    # ----- review_q -----
+    if phase == "review_q":
         qidx = ses["q_index"]
-        # Advance to next question if any
-        if qidx < 2:
-            ses["q_index"] += 1
-            ses["phase"] = "ask_q"
-            q = ses["questions"][ses["q_index"]]
-            return TutorSessionNextResponse(
-                session_id=session_id,
-                phase="ask_q",
-                assistant_msg=q,
-                progress={"q_index": ses["q_index"]+1, "total": 3},
-                done=False,
+        qs = ses["questions"]
+        exp = ses["explanation"]
+
+        if _is_next_intent(user_turn):
+            next_idx = qidx + 1
+            if next_idx >= len(qs):
+                total_correct = sum(1 for x in ses["scores"] if x is True)
+                ses["phase"] = "wrap_up"
+                wrap_msg = f"Nice work — you answered {total_correct}/3 correctly.\n\n**Reference Explanation**\n{exp}"
+                _append_memory(ses, "assistant", wrap_msg, meta={"type":"wrap"})
+                return TutorSessionNextResponse(session_id=session_id, phase="wrap_up", assistant_msg=wrap_msg, progress={"correct":total_correct,"total":3}, done=False)
+            else:
+                ses["q_index"] = next_idx
+                ses["phase"] = "ask_q"
+                qn = qs[next_idx]
+                _append_memory(ses, "assistant", qn, meta={"type":"question","q_index":next_idx})
+                return TutorSessionNextResponse(session_id=session_id, phase="ask_q", assistant_msg=qn, progress={"q_index":next_idx+1,"total":len(qs)}, done=False)
+
+        # user asked a follow-up OR "answer the question" after feedback
+        if _is_answer_intent(user_turn):
+            answer = _llm_text_with_memory(
+                client,
+                system_prompt="You are a concise, helpful tutor.",
+                user_prompt=f"Answer this question directly and clearly, grounded in the explanation.\n\nQUESTION:\n{qs[qidx]}\n\nEXPLANATION:\n{exp}",
+                ses=ses,
             )
         else:
-            # Finished all three — wrap up
-            total = sum(1 for x in ses["scores"] if x is True)
-            ses["phase"] = "wrap_up"
-            wrap_msg = (
-                f"Nice work — you answered {total}/3 correctly.\n\n"
-                f"**Reference Explanation**\n{ses['explanation']}"
+            answer = _llm_text_with_memory(
+                client,
+                system_prompt="You are a helpful tutor who answers clearly and briefly, grounded in the given explanation.",
+                user_prompt=f"Follow-up question:\n{user_turn}\n\nExplanation:\n{exp}\n\nProvide a clear answer.",
+                ses=ses,
             )
-            return TutorSessionNextResponse(
-                session_id=session_id,
-                phase="wrap_up",
-                assistant_msg=wrap_msg,
-                progress={"correct": total, "total": 3},
-                done=False,
-            )
+        _append_memory(ses, "assistant", answer, meta={"type":"followup"})
 
-    # Phase: wrap_up -> any next input ends the session
+        tail = "\n\n(When ready, say 'next' to continue to the next question.)"
+        _append_memory(ses, "assistant", answer + tail)
+        return TutorSessionNextResponse(session_id=session_id, phase="review_q", assistant_msg=answer + tail, progress={"q_index":qidx+1,"total":len(qs)}, done=False)
+
+    # ----- wrap_up -----
     if phase == "wrap_up":
         ses["phase"] = "done"
-        return TutorSessionNextResponse(
-            session_id=session_id,
-            phase="done",
-            assistant_msg="Great job! If you want, we can run another round or focus on a specific section.",
-            progress=None,
-            done=True,
-        )
+        msg = "Great job! If you want, we can run another round or focus on a specific section."
+        _append_memory(ses, "assistant", msg)
+        return TutorSessionNextResponse(session_id=session_id, phase="done", assistant_msg=msg, progress=None, done=True)
 
     # Fallback
     ses["phase"] = "done"
-    return TutorSessionNextResponse(
-        session_id=session_id,
-        phase="done",
-        assistant_msg="Session ended.",
-        progress=None,
-        done=True,
-    )
+    _append_memory(ses, "assistant", "Session ended.")
+    return TutorSessionNextResponse(session_id=session_id, phase="done", assistant_msg="Session ended.", progress=None, done=True)
 
 # ===== Basic-mode summary cache helpers =====
 

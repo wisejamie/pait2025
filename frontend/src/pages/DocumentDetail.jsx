@@ -8,6 +8,8 @@ import {
   streamSummary,
 } from "../services/api";
 import axios from "axios";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -42,6 +44,8 @@ export default function DocumentDetail() {
   const [summaryStreaming, setSummaryStreaming] = useState(false);
   const [summaryError, setSummaryError] = useState(null);
   const [summaryES, setSummaryES] = useState(null);
+
+  const [focusPickerOpen, setFocusPickerOpen] = useState(false);
 
   const getDescendantIds = (section) => {
     let ids = [section.id];
@@ -167,24 +171,27 @@ export default function DocumentDetail() {
     });
 
   const startThreeQTest = async () => {
-    if (!currentSectionId) return;
+    // if (!currentSectionId) return;
     try {
-      const ses = await createTutorSession(id, currentSectionId);
+      // autostart: immediately returns Q1
+      const ses = await createTutorSession(id, currentSectionId || null, true);
       setTutorSessionId(ses.session_id);
-      setTutorPhase(ses.phase);
-      setTutorProgress(ses.progress || null);
+      setTutorPhase(ses.phase); // should be "ask_q"
+      setTutorProgress(ses.progress || null); // {q_index:1,total:3}
       setInTestMode(true);
-      // Show the offer message in the chat stream
+      // Show Question 1 right away
       setChatHistory((h) => [
         ...h,
         { role: "assistant", text: ses.assistant_msg },
       ]);
     } catch (e) {
-      setChatHistory((h) => [
-        ...h,
-        { role: "assistant", text: "Couldn’t start the test right now." },
-      ]);
-      console.error(e);
+      const msg =
+        e?.response?.data?.detail ||
+        e?.response?.data?.message ||
+        e?.message ||
+        "Couldn’t start the test right now.";
+      setChatHistory((h) => [...h, { role: "assistant", text: String(msg) }]);
+      console.error("createTutorSession failed:", e?.response || e);
     }
   };
 
@@ -253,7 +260,8 @@ export default function DocumentDetail() {
 
   // BASIC: send a chat turn scoped to current section
   const sendChat = async () => {
-    if (!currentSectionId || !chatInput.trim() || sending) return;
+    // if (!currentSectionId || !chatInput.trim() || sending) return;
+    if (!chatInput.trim() || sending) return;
     const question = chatInput.trim();
     setChatHistory((h) => [...h, { role: "user", text: question }]);
     setChatInput("");
@@ -325,7 +333,36 @@ export default function DocumentDetail() {
     );
   };
 
-  // BASIC LAYOUT
+  // Seed the chat with a focused exploration starter prompt for a given section
+  const startFocusedExploration = (sectionId) => {
+    if (!sectionId) return;
+    setCurrentSectionId(sectionId);
+    // seed the chat with a soft nudge
+    const starter =
+      "Walk me through the main ideas of this section, step by step.";
+    setChatHistory((h) => [...h, { role: "user", text: starter }]);
+    // Reuse the normal send flow
+    setChatInput(starter);
+    setTimeout(() => {
+      setChatInput(starter);
+      // trigger sendChat without double-adding
+      const evt = new KeyboardEvent("keydown", { key: "Enter" });
+      // we won’t dispatch keyboard events; simply call sendChat()
+      sendChat();
+    }, 0);
+    setFocusPickerOpen(false);
+  };
+
+  // Utility to flatten the section tree for a simple picker
+  const flattenSectionsForPicker = (secs, depth = 0) => {
+    const rows = [];
+    for (const s of secs || []) {
+      rows.push({ id: s.id, title: s.title, depth });
+      rows.push(...flattenSectionsForPicker(s.sub_sections, depth + 1));
+    }
+    return rows;
+  };
+
   // BASIC LAYOUT with Summary panel at the top
   if (mode === "basic") {
     return (
@@ -354,6 +391,32 @@ export default function DocumentDetail() {
               Preparing a concise summary of the document…
             </div>
           )}
+
+          {/* Guided actions */}
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              onClick={startThreeQTest}
+              disabled={inTestMode}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded disabled:opacity-50"
+              title="Open-ended analysis: a short, 3-question check of understanding"
+            >
+              Open-ended analysis (3 Qs)
+            </button>
+            <button
+              onClick={() => setFocusPickerOpen(true)}
+              className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded"
+              title="Pick a section to zoom in and explore conversationally"
+            >
+              Focused section exploration
+            </button>
+            <button
+              onClick={() => setCurrentSectionId(null)}
+              className="px-3 py-1.5 border rounded hover:bg-gray-50"
+              title="Switch back to document-level context"
+            >
+              Zoom out (document scope)
+            </button>
+          </div>
         </div>
 
         {/* Optional: Global learning objectives */}
@@ -410,7 +473,7 @@ export default function DocumentDetail() {
               )}
               <button
                 onClick={startThreeQTest}
-                disabled={!currentSectionId || inTestMode}
+                disabled={inTestMode}
                 className="w-full px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded disabled:opacity-50"
               >
                 Test me on this section (3 Qs)
@@ -432,75 +495,155 @@ export default function DocumentDetail() {
                   example”, or “Why does this matter?”
                 </div>
               ) : (
-                chatHistory.map((m, i) => (
-                  <div
-                    key={i}
-                    className={m.role === "user" ? "text-right" : "text-left"}
-                  >
+                chatHistory.map((m, i) => {
+                  const isUser = m.role === "user";
+                  return (
                     <div
-                      className={`inline-block px-3 py-2 rounded ${
-                        m.role === "user"
-                          ? "bg-blue-600 text-white"
-                          : "bg-gray-100 text-gray-900"
-                      }`}
+                      key={i}
+                      className={isUser ? "text-right" : "text-left"}
                     >
-                      {m.text}
+                      <div
+                        className={[
+                          "inline-block px-3 py-2 rounded max-w-full",
+                          isUser
+                            ? "bg-blue-600 text-white"
+                            : "bg-gray-100 text-gray-900",
+                        ].join(" ")}
+                        style={{ wordBreak: "break-word" }}
+                      >
+                        <div
+                          className={[
+                            // Pretty Markdown; if you use Tailwind Typography, these apply.
+                            "prose prose-sm max-w-none",
+                            // On dark user bubble, invert prose colors so headings/lists stay readable.
+                            isUser ? "prose-invert text-white" : "",
+                          ].join(" ")}
+                        >
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              a: ({ node, ...props }) => (
+                                <a
+                                  {...props}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                />
+                              ),
+                              // keep code blocks wrapping nicely inside bubbles
+                              code: ({
+                                inline,
+                                className,
+                                children,
+                                ...props
+                              }) => (
+                                <code
+                                  className={[
+                                    "whitespace-pre-wrap",
+                                    className || "",
+                                  ].join(" ")}
+                                  {...props}
+                                >
+                                  {children}
+                                </code>
+                              ),
+                            }}
+                          >
+                            {m.text || ""}
+                          </ReactMarkdown>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
             {/* Quick replies for test offer/ask phases */}
-            {inTestMode && (
+            {!inTestMode && (
               <div className="mt-2 flex flex-wrap gap-2 text-sm">
-                {tutorPhase === "offer_test" ? (
-                  <>
-                    <button
-                      onClick={() => {
-                        setChatHistory((h) => [
-                          ...h,
-                          { role: "user", text: "Yes" },
-                        ]);
-                        sendTutorTurn("yes");
-                      }}
-                      className="px-2 py-1 border rounded hover:bg-gray-50"
-                    >
-                      Yes
-                    </button>
-                    <button
-                      onClick={() => {
-                        setChatHistory((h) => [
-                          ...h,
-                          { role: "user", text: "No" },
-                        ]);
-                        sendTutorTurn("no");
-                      }}
-                      className="px-2 py-1 border rounded hover:bg-gray-50"
-                    >
-                      Not now
-                    </button>
-                  </>
-                ) : tutorPhase === "ask_q" ? (
-                  <>
-                    <span className="text-gray-500 self-center">
-                      Answer in the box below, or
-                    </span>
-                    <button
-                      onClick={() => {
-                        setChatHistory((h) => [
-                          ...h,
-                          { role: "user", text: "Skip" },
-                        ]);
-                        sendTutorTurn("Skip");
-                      }}
-                      className="px-2 py-1 border rounded hover:bg-gray-50"
-                    >
-                      Skip
-                    </button>
-                  </>
-                ) : null}
+                <button
+                  onClick={() => {
+                    setChatInput("Explain this section in simple terms.");
+                    setTimeout(sendChat, 0);
+                  }}
+                  disabled={!currentSectionId || sending}
+                  className="px-2 py-1 border rounded hover:bg-gray-50"
+                >
+                  Explain this section
+                </button>
+                <button
+                  onClick={() => {
+                    setChatInput(
+                      "Ask me an open-ended question about this section."
+                    );
+                    setTimeout(sendChat, 0);
+                  }}
+                  disabled={!currentSectionId || sending}
+                  className="px-2 py-1 border rounded hover:bg-gray-50"
+                >
+                  Ask me a question
+                </button>
+                <button
+                  onClick={() => {
+                    setChatInput("What did I miss or misunderstand so far?");
+                    setTimeout(sendChat, 0);
+                  }}
+                  disabled={!currentSectionId || sending}
+                  className="px-2 py-1 border rounded hover:bg-gray-50"
+                >
+                  What did I miss?
+                </button>
               </div>
             )}
+            {/* // {inTestMode && (
+            //   <div className="mt-2 flex flex-wrap gap-2 text-sm">
+            //     {tutorPhase === "offer_test" ? (
+            //       <>
+            //         <button
+            //           onClick={() => {
+            //             setChatHistory((h) => [
+            //               ...h,
+            //               { role: "user", text: "Yes" },
+            //             ]);
+            //             sendTutorTurn("yes");
+            //           }}
+            //           className="px-2 py-1 border rounded hover:bg-gray-50"
+            //         >
+            //           Yes
+            //         </button>
+            //         <button
+            //           onClick={() => {
+            //             setChatHistory((h) => [
+            //               ...h,
+            //               { role: "user", text: "No" },
+            //             ]);
+            //             sendTutorTurn("no");
+            //           }}
+            //           className="px-2 py-1 border rounded hover:bg-gray-50"
+            //         >
+            //           Not now
+            //         </button>
+            //       </>
+            //     ) : tutorPhase === "ask_q" ? (
+            //       <>
+            //         <span className="text-gray-500 self-center">
+            //           Answer in the box below, or
+            //         </span>
+            //         <button
+            //           onClick={() => {
+            //             setChatHistory((h) => [
+            //               ...h,
+            //               { role: "user", text: "Skip" },
+            //             ]);
+            //             sendTutorTurn("Skip");
+            //           }}
+            //           className="px-2 py-1 border rounded hover:bg-gray-50"
+            //         >
+            //           Skip
+            //         </button>
+            //       </>
+            //     ) : null}
+            //   </div>
+            // )} */}
             <div className="mt-3 flex gap-2">
               <input
                 className="flex-1 border rounded px-3 py-2"
@@ -514,18 +657,84 @@ export default function DocumentDetail() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter") sendChat();
                 }}
-                disabled={!currentSectionId || sending}
+                // disabled={!currentSectionId || sending}
+                disabled={sending}
               />
               <button
                 onClick={sendChat}
-                disabled={!currentSectionId || sending || !chatInput.trim()}
+                // disabled={!currentSectionId || sending || !chatInput.trim()}
+                disabled={sending || !chatInput.trim()}
                 className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded disabled:opacity-50"
               >
                 {sending ? "Sending…" : inTestMode ? "Submit answer" : "Send"}
               </button>
+
+              {inTestMode && tutorPhase === "review_q" && (
+                <button
+                  onClick={async () => {
+                    if (!tutorSessionId) return;
+                    try {
+                      const res = await nextTutorTurn(tutorSessionId, "next");
+                      setTutorPhase(res.phase);
+                      setTutorProgress(res.progress || null);
+                      setChatHistory((h) => [
+                        ...h,
+                        { role: "assistant", text: res.assistant_msg },
+                      ]);
+                      if (res.done) {
+                        setInTestMode(false);
+                      }
+                    } catch (err) {
+                      console.error("Next question failed:", err);
+                    }
+                  }}
+                  className="px-3 py-1 bg-green-600 text-white rounded"
+                >
+                  Next Question
+                </button>
+              )}
             </div>
           </div>
         </div>
+        {/* Focused exploration: section picker modal */}
+        {focusPickerOpen && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-40">
+            <div className="bg-white rounded-lg shadow-lg w-full max-w-lg p-4">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-lg font-semibold">
+                  Choose a section to explore
+                </h3>
+                <button
+                  onClick={() => setFocusPickerOpen(false)}
+                  className="text-gray-500 hover:text-gray-700"
+                  aria-label="Close"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="max-h-80 overflow-y-auto border rounded p-2 space-y-1">
+                {flattenSectionsForPicker(sections).map((row) => (
+                  <button
+                    key={row.id}
+                    onClick={() => startFocusedExploration(row.id)}
+                    className="w-full text-left px-2 py-1 rounded hover:bg-gray-50"
+                    style={{ paddingLeft: row.depth * 14 + 8 }}
+                  >
+                    {row.title}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-3 flex justify-end gap-2">
+                <button
+                  onClick={() => setFocusPickerOpen(false)}
+                  className="px-3 py-1.5 border rounded hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
